@@ -1,0 +1,14 @@
+# 运行时产物
+models/
+outputs/
+logs/
+settings.json
+*.log
+torchinductor_*/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
