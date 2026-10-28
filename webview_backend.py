@@ -103,6 +103,12 @@ class WebBackend:
 
     def set_settings(self, patch: dict) -> dict:
         patch = {k: v for k, v in (patch or {}).items() if k in DEFAULT_SETTINGS}
+        # 模型目录变化即时同步给引擎（仅空闲时切，避免下载/识别中途换目录——
+        # 否则会出现「下载到新目录、加载却找旧目录」的分裂）
+        if "modelDir" in patch and not self.has_running_tasks():
+            new_dir = Path(str(patch["modelDir"]).strip() or (BASE_DIR / MODEL_SUBDIR))
+            if new_dir != self.engine.model_dir:
+                self.engine.model_dir = new_dir
         old_theme = self.persisted_theme()
         self.settings.update(patch)
         self._apply_mirror_from_settings()
@@ -519,7 +525,9 @@ class WebBackend:
     def list_history(self) -> dict:
         try:
             items = []
-            for p in sorted(OUTPUT_DIR.glob("*.md"), key=lambda x: x.stat().st_mtime,
+            for p in sorted((q for q in OUTPUT_DIR.iterdir()
+                             if q.suffix.lower() in (".md", ".txt")),
+                            key=lambda x: x.stat().st_mtime,
                             reverse=True)[:50]:
                 items.append({"name": p.name, "path": str(p),
                               "mtime": int(p.stat().st_mtime),
@@ -529,11 +537,8 @@ class WebBackend:
             return {"items": []}
 
     def history_read(self, name: str) -> dict:
-        """按文件名读取历史结果（防路径穿越：只允许 outputs/ 下的 .md）。"""
-        safe = self._sanitize_name(Path(name).name)
-        if not safe.endswith(".md"):
-            safe += ".md"
-        p = OUTPUT_DIR / safe
+        """按文件名读取历史结果（防路径穿越：只允许 outputs/ 下的 .md/.txt）。"""
+        p = self._history_path(name)
         if not p.is_file():
             return {"ok": False, "error": "记录不存在"}
         try:
@@ -543,10 +548,7 @@ class WebBackend:
             return {"ok": False, "error": str(e)}
 
     def history_delete(self, name: str) -> dict:
-        safe = self._sanitize_name(Path(name).name)
-        if not safe.endswith(".md"):
-            safe += ".md"
-        p = OUTPUT_DIR / safe
+        p = self._history_path(name)
         if not p.is_file():
             return {"ok": False, "error": "记录不存在"}
         try:
@@ -554,6 +556,13 @@ class WebBackend:
             return {"ok": True, "recycled": recycle}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    def _history_path(self, name: str) -> Path:
+        """历史文件名 → outputs/ 下的实际路径（保持 .md/.txt 后缀）。"""
+        safe = self._sanitize_name(Path(name).name)
+        if not safe.lower().endswith((".md", ".txt")):
+            safe += ".md"
+        return OUTPUT_DIR / safe
 
     @staticmethod
     def _recycle_file(p: Path) -> bool:
@@ -565,10 +574,12 @@ class WebBackend:
                 return True
             except ImportError:
                 pass
-            # PowerShell VisualBasic 删除到回收站（免第三方依赖）
+            # PowerShell VisualBasic 删除到回收站（免第三方依赖）；
+            # 文件名单引号翻倍转义，防注入 / 提前闭合字符串
             ps = ("Add-Type -AssemblyName Microsoft.VisualBasic; "
                   f"[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile("
-                  f"'{p}', 'OnlyErrorDialogs', 'SendToRecycleBin')")
+                  f"'{str(p).replace(chr(39), chr(39) * 2)}', "
+                  f"'OnlyErrorDialogs', 'SendToRecycleBin')")
             subprocess.run(["powershell", "-NoProfile", "-Command", ps],
                            capture_output=True, timeout=30)
             return not p.exists()

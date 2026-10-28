@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import queue
+import shutil
 import sys
 import tempfile
 import threading
@@ -139,7 +140,6 @@ def _parse_multipart_stream(rfile, boundary: bytes, out_dir: Path,
                 acc.extend(piece)
 
         keep = len(delim) - 1
-        terminated = False
         search_from = 0
         try:
             while True:
@@ -154,7 +154,6 @@ def _parse_multipart_stream(rfile, boundary: bytes, out_dir: Path,
                     if nxt[:2] in (b"\r\n", b"--"):
                         _emit(buf[:i])
                         buf = buf[i + len(delim):]
-                        terminated = True
                         break
                     search_from = i + 1
                     continue
@@ -166,7 +165,6 @@ def _parse_multipart_stream(rfile, boundary: bytes, out_dir: Path,
                 if not chunk:
                     _emit(buf)
                     buf = b""
-                    terminated = True
                     break
                 buf += chunk
         finally:
@@ -403,47 +401,45 @@ class WebViewServer:
                     return self._err(400, "请求体为空")
 
                 tmp_dir = Path(tempfile.mkdtemp(prefix="ocr_web_"))
-                fields, files = _parse_multipart_stream(
-                    self.rfile, boundary, tmp_dir, n)
-                uploads = files.get("files") or files.get("file") or []
-                if not uploads:
-                    return self._err(400, "缺少 files 部件")
-                for _fname, p in uploads:
-                    if not p.is_file() or p.stat().st_size == 0:
-                        return self._err(400, "上传内容为空")
-
-                # 保持前端给出的页序
-                paths = [str(p) for _fn, p in uploads]
-                primary_name = Path(uploads[0][0] or "result").stem or "result"
-                # 多文件用公共前缀（同名不同扩展）或「前缀 等 N 个文件」
-                if len(uploads) > 1:
-                    stems = {Path(fn or "").stem for fn, _ in uploads if fn}
-                    primary_name = sorted(stems)[0] + \
-                                   (f" 等{len(uploads)}个" if len(stems) > 1 else "")
-                opts = {
-                    "paths": paths,
-                    # 原始文件名（与 paths 一一对应）：批量模式的条目名/产物命名用
-                    "names": [fn or "" for fn, _p in uploads],
-                    "name": primary_name,
-                    "prompt": fields.get("prompt", ""),
-                    "mode": (fields.get("mode") or "").strip(),
-                }
+                # 解析、校验、识别任何一步退出都要清掉临时目录
                 try:
-                    result = server.backend.recognize(
-                        opts, progress_cb=lambda pct, status:
-                        server.hub.publish("progress", {"pct": pct, "status": status}))
-                    return self._json(result)
-                except Exception as e:
-                    from applog import log_error
-                    log_error(f"识别失败：{primary_name}", exc=e)
-                    head = str(e).splitlines()[0][:300] if str(e) else type(e).__name__
-                    return self._err(500, head)
-                finally:
+                    fields, files = _parse_multipart_stream(
+                        self.rfile, boundary, tmp_dir, n)
+                    uploads = files.get("files") or files.get("file") or []
+                    if not uploads:
+                        return self._err(400, "缺少 files 部件")
+                    for _fname, p in uploads:
+                        if not p.is_file() or p.stat().st_size == 0:
+                            return self._err(400, "上传内容为空")
+
+                    # 保持前端给出的页序
+                    paths = [str(p) for _fn, p in uploads]
+                    primary_name = Path(uploads[0][0] or "result").stem or "result"
+                    # 多文件用公共前缀（同名不同扩展）或「前缀 等 N 个文件」
+                    if len(uploads) > 1:
+                        stems = {Path(fn or "").stem for fn, _ in uploads if fn}
+                        primary_name = (sorted(stems)[0] if stems else "result") + \
+                                       (f" 等{len(uploads)}个" if len(stems) > 1 else "")
+                    opts = {
+                        "paths": paths,
+                        # 原始文件名（与 paths 一一对应）：批量模式的条目名/产物命名用
+                        "names": [fn or "" for fn, _p in uploads],
+                        "name": primary_name,
+                        "prompt": fields.get("prompt", ""),
+                        "mode": (fields.get("mode") or "").strip(),
+                    }
                     try:
-                        import shutil
-                        shutil.rmtree(tmp_dir, ignore_errors=True)
-                    except Exception:
-                        pass
+                        result = server.backend.recognize(
+                            opts, progress_cb=lambda pct, status:
+                            server.hub.publish("progress", {"pct": pct, "status": status}))
+                        return self._json(result)
+                    except Exception as e:
+                        from applog import log_error
+                        log_error(f"识别失败：{primary_name}", exc=e)
+                        head = str(e).splitlines()[0][:300] if str(e) else type(e).__name__
+                        return self._err(500, head)
+                finally:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
 
         self._httpd = ThreadingHTTPServer((self.host, self._want_port), _Handler)
         self.port = self._httpd.server_address[1]
