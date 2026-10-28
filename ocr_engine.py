@@ -256,26 +256,6 @@ class OcrEngine:
         finally:
             doc.close()
 
-    # ── GIF → 帧图 ───────────────────────────────────────────
-    @staticmethod
-    def gif_to_images(gif_path: str | Path,
-                      out_dir: Path | None = None) -> list[Path]:
-        """GIF 逐帧转 PNG（PIL）。动图每帧算一页；单帧 GIF 退化为一张图。
-
-        直接把 .gif 喂给模型只会读到第一帧——PIL 打开动图后游标停在
-        首帧，模型侧的图像加载不会翻帧，其余帧静默丢失。
-        """
-        from PIL import Image, ImageSequence
-        gif_path = Path(gif_path)
-        out_dir = Path(out_dir or gif_path.parent)
-        frames = []
-        with Image.open(gif_path) as im:
-            for i, frame in enumerate(ImageSequence.Iterator(im)):
-                p = out_dir / f"_ocr_frame_{gif_path.stem}_{i + 1:04d}.png"
-                frame.convert("RGB").save(str(p))
-                frames.append(p)
-        return frames
-
     # ── 识别 ─────────────────────────────────────────────────
     def recognize(self, image_paths: list[Path], prompt: str = "",
                   progress_cb=None, cancel_event: threading.Event | None = None,
@@ -305,25 +285,20 @@ class OcrEngine:
         _STREAM_HOOK["cancel_event"] = cancel_event
         _STREAM_HOOK["state"] = self.stream_state
         try:
-            # PDF / 动图 GIF 不是单张位图：先展开成页图（临时文件，推理后清理）。
+            # PDF 不是单张位图：先逐页转 PNG（临时文件，推理后清理）。
             import tempfile as _tempfile
             expanded: list[Path] = []
             tmp_dirs: list[str] = []
             try:
                 for p in image_paths:
-                    suffix = p.suffix.lower()
-                    if suffix == ".pdf":
+                    if p.suffix.lower() == ".pdf":
                         tmp_dir = Path(_tempfile.mkdtemp(prefix="ocr_pdf_"))
                         tmp_dirs.append(str(tmp_dir))
                         expanded.extend(self.pdf_to_images(p, out_dir=tmp_dir))
-                    elif suffix == ".gif":
-                        tmp_dir = Path(_tempfile.mkdtemp(prefix="ocr_gif_"))
-                        tmp_dirs.append(str(tmp_dir))
-                        expanded.extend(self.gif_to_images(p, out_dir=tmp_dir))
                     else:
                         expanded.append(p)
                 if not expanded:
-                    raise EngineError("没有可识别的页面（PDF/GIF 转换后为空）。")
+                    raise EngineError("没有可识别的页面（PDF 转换后为空）。")
 
                 if len(expanded) == 1:
                     if progress_cb:

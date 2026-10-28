@@ -65,7 +65,7 @@
         <div class="drop" id="drop">
           <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-4.5-4.5L7 20"/></svg></div>
           <div class="big">拖拽图片到此，或<b>点击选择文件</b></div>
-          <div class="sub">支持 jpg / png / gif / bmp / webp / tiff，可多选；PDF 会自动逐页、动图 GIF 会自动逐帧转图片识别</div>
+          <div class="sub">支持 jpg / png / bmp / webp / tiff，可多选；PDF 会自动逐页转图片识别</div>
           <div class="pick-row"><button class="btn btn-ghost btn-sm" id="btn-pick">选择文件…</button></div>
         </div>
 
@@ -198,7 +198,7 @@
   </div>
 </div>
 
-<input id="hidden-file" type="file" accept="image/*,.pdf" multiple style="display:none">
+<input id="hidden-file" type="file" accept=".jpg,.jpeg,.png,.bmp,.webp,.tif,.tiff,.pdf" multiple style="display:none">
 <a id="download-link" style="display:none"></a>
 <script src="js/bridge.js?v=1"></script>
 <script src="js/app.js?v=1"></script>

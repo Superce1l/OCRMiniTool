@@ -21,7 +21,7 @@ const state = {
   resultMode: "rendered",
   status: null,
   settings: { outFormat: "md" },
-  knownExts: new Set(["jpg", "jpeg", "png", "gif", "bmp", "webp", "tif", "tiff", "pdf"]),
+  knownExts: new Set(["jpg", "jpeg", "png", "bmp", "webp", "tif", "tiff", "pdf"]),
 };
 
 /* ── 工具 ─────────────────────────────────────────────── */
@@ -148,7 +148,9 @@ function addFiles(list) {
   let rejected = 0;
   for (const f of list) {
     const ext = f.name.split(".").pop()?.toLowerCase() || "";
-    const ok = f.type.startsWith("image/") || state.knownExts.has(ext);
+    // GIF 不支持（动图只读得到第一帧），MIME / 扩展名两条路都拦掉
+    const ok = (f.type.startsWith("image/") && ext !== "gif")
+      || state.knownExts.has(ext);
     if (!ok) { rejected++; continue; }
     state.files.push(f);
   }
