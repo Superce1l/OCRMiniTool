@@ -148,6 +148,10 @@ class OcrEngine:
     def error(self) -> str | None:
         return self._error
 
+    def report_error(self, msg: str):
+        """加载线程等外部写入失败信息（error 是只读属性，别直接碰 _error）。"""
+        self._error = str(msg)
+
     def device_info(self) -> dict:
         """torch/CUDA 检测（不依赖模型已加载）。"""
         info = {"torch": None, "cuda": False, "cudaName": "", "vramGb": 0.0,

@@ -418,8 +418,7 @@ class WebViewServer:
                 # 多文件用公共前缀（同名不同扩展）或「前缀 等 N 个文件」
                 if len(uploads) > 1:
                     stems = {Path(fn or "").stem for fn, _ in uploads if fn}
-                    primary_name = (sorted(stems)[0] if len(stems) == 1
-                                    else sorted(stems)[0]) + \
+                    primary_name = sorted(stems)[0] + \
                                    (f" 等{len(uploads)}个" if len(stems) > 1 else "")
                 opts = {
                     "paths": paths,

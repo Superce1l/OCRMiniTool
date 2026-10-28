@@ -234,7 +234,7 @@ class WebBackend:
                 self._emit("load-progress", {"pct": 1.0, "status": "模型就绪"})
             except Exception as e:
                 log_error("模型加载失败", exc=e)
-                self.engine._error = str(e)
+                self.engine.report_error(str(e))
                 self._emit("load-progress", {"pct": 0, "status": f"加载失败：{e}"})
             finally:
                 with self._lock:
@@ -363,6 +363,13 @@ class WebBackend:
             if progress_cb:
                 progress_cb(last["pct"], last["label"])
 
+        def _skip_item(idx: int):
+            # 展示名一律用原始文件名（上传临时名 part_N_upload 不对外）
+            name = (names[idx] if idx < len(names) and names[idx]
+                    else paths[idx].name)
+            items.append({"name": name, "ok": False, "skipped": True,
+                          "text": "", "elapsed": 0, "chars": 0})
+
         # 心跳：把「第 i/N 个 + 已生成字数 + 已用时」每 5 秒推给界面
         stop_ticker = threading.Event()
 
@@ -383,10 +390,8 @@ class WebBackend:
             for i, path in enumerate(paths):
                 if self.cancel_event.is_set():
                     cancelled = True
-                    for p in paths[i:]:
-                        items.append({"name": p.name, "ok": False,
-                                      "skipped": True, "text": "",
-                                      "elapsed": 0, "chars": 0})
+                    for j in range(i, len(paths)):
+                        _skip_item(j)
                     break
 
                 # 展示名用原始文件名（上传临时文件名 part_N_upload 不对外）
@@ -429,10 +434,8 @@ class WebBackend:
                         items.append({"name": display, "ok": False,
                                       "skipped": True, "text": "",
                                       "elapsed": 0, "chars": 0})
-                        for p in paths[i + 1:]:
-                            items.append({"name": p.name, "ok": False,
-                                          "skipped": True, "text": "",
-                                          "elapsed": 0, "chars": 0})
+                        for j in range(i + 1, len(paths)):
+                            _skip_item(j)
                         break
                     log_error(f"批量 {i + 1}/{total} 失败：{display}", exc=e)
                     items.append({"name": display, "ok": False,

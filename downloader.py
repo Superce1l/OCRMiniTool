@@ -12,7 +12,6 @@
 """
 from __future__ import annotations
 
-import os
 import ssl
 import sys
 import time
@@ -310,7 +309,7 @@ def _safe_print(*args, **kwargs):
     except UnicodeEncodeError:
         msg = msg.encode(enc, errors="replace").decode(enc, errors="replace")
     kwargs.pop("file", None)
-    print(msg, **kwargs)
+    print(msg, file=out, **kwargs)
 
 
 def _cli_bar(pct: float, msg: str):
