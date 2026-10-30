@@ -19,10 +19,11 @@ import webbrowser
 from ctypes import wintypes
 from pathlib import Path
 
+from i18n import tr
 from proc_guard import setup_kill_on_close_job
 from webview_server import WebViewServer
 
-APP_NAME = "OCR 小工具"
+APP_NAME = "OCR MiniTool"     # main() 里按 settings.json 的 lang 经 i18n 重设
 WIN_W, WIN_H = 1024, 720
 MIN_W, MIN_H = 900, 640
 
@@ -259,7 +260,7 @@ def _confirm_quit_with_task(label: str) -> bool:
         return True
     import ctypes as _ct
     MB_OKCANCEL, MB_ICONWARNING = 0x1, 0x30
-    msg = (f"{label}尚未完成。\n\n现在退出将中断该任务。\n确定要退出吗？")
+    msg = tr("dlg.quitBody", label=label)
     r = _ct.windll.user32.MessageBoxW(0, msg, APP_NAME, MB_OKCANCEL | MB_ICONWARNING)
     return r == 1
 
@@ -351,6 +352,13 @@ def main():
     srv = WebViewServer(host="127.0.0.1", port=0)
     srv.start()
     _BACKEND_REF[0] = srv.backend
+
+    # 窗口标题/退出弹窗按 settings.json 的语言（WebBackend 构造时已 set_lang）
+    global APP_NAME
+    try:
+        APP_NAME = tr("app.name")
+    except Exception:
+        pass
 
     global _initial_theme
     try:

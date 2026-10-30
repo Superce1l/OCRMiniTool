@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="zh-Hans">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>OCR 小工具</title>
+<title>OCR MiniTool</title>
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -16,7 +16,7 @@
   <!-- ════════════ 侧栏 ════════════ -->
   <aside class="sidebar">
     <div class="brand">
-      <div class="logo" title="OCR 小工具">
+      <div class="logo" data-i18n-title="app.name" title="OCR MiniTool">
         <svg viewBox="0 0 48 48" fill="none">
           <rect x="4" y="4" width="40" height="40" rx="10" fill="#0E7490"/>
           <path d="M12 15h24" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
@@ -26,27 +26,27 @@
           <path d="M33.8 34.8L38 39" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
         </svg>
       </div>
-      <div class="name">OCR 小工具</div>
+      <div class="name" data-i18n="app.name">OCR MiniTool</div>
     </div>
 
     <nav class="nav" id="nav">
       <button class="nav-item active" data-view="ocr">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h4"/></svg>
-        <span class="lbl">识别</span>
+        <span class="lbl" data-i18n="nav.ocr">Recognize</span>
       </button>
       <button class="nav-item" data-view="model">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg>
-        <span class="lbl">模型</span>
+        <span class="lbl" data-i18n="nav.model">Model</span>
       </button>
       <button class="nav-item" data-view="settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-        <span class="lbl">设置</span>
+        <span class="lbl" data-i18n="nav.settings">Settings</span>
       </button>
     </nav>
 
     <div class="side-foot">
       <div class="status-dot off" id="model-status" title="">
-        <span class="dot"></span><span class="t" id="model-status-t">尚未加载模型</span>
+        <span class="dot"></span><span class="t" id="model-status-t" data-i18n="status.notLoadedInitial">Model not loaded</span>
       </div>
     </div>
   </aside>
@@ -54,7 +54,7 @@
   <!-- ════════════ 主区 ════════════ -->
   <div class="main">
     <header class="topbar">
-      <h1 id="view-title">图片识别</h1>
+      <h1 id="view-title" data-i18n="view.ocr">Image Recognition</h1>
       <div class="ctx" id="view-ctx"></div>
     </header>
 
@@ -64,50 +64,50 @@
       <section class="view active" data-view="ocr">
         <div class="drop" id="drop">
           <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-4.5-4.5L7 20"/></svg></div>
-          <div class="big">拖拽图片到此，或<b>点击选择文件</b></div>
-          <div class="sub">支持 jpg / png / bmp / webp / tiff，可多选；PDF 会自动逐页转图片识别</div>
-          <div class="pick-row"><button class="btn btn-ghost btn-sm" id="btn-pick">选择文件…</button></div>
+          <div class="big" data-i18n-html="drop.big">Drop images here, or <b>click to browse</b></div>
+          <div class="sub" data-i18n="drop.sub">Supports jpg / png / bmp / webp / tiff, multi-select; PDFs are converted page-by-page automatically</div>
+          <div class="pick-row"><button class="btn btn-ghost btn-sm" id="btn-pick" data-i18n="drop.pick">Choose files…</button></div>
         </div>
 
         <!-- 已选文件列表 -->
         <div id="file-list" class="file-list" hidden></div>
 
         <div class="controls">
-          <div class="seg" id="ocr-mode" title="合并解析＝多个文件当作同一文档的多页（跨页上下文）；批量识别＝每个文件独立识别、独立出结果">
-            <button data-v="merged" class="on">合并解析</button><button data-v="batch">批量识别</button>
+          <div class="seg" id="ocr-mode" data-i18n-title="ocr.modeTip" title="">
+            <button data-v="merged" class="on" data-i18n="ocr.modeMerged">Merged parsing</button><button data-v="batch" data-i18n="ocr.modeBatch">Batch</button>
           </div>
           <button class="btn btn-primary" id="btn-run" disabled>
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg><span>开始识别</span>
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg><span data-i18n="btn.run">Start recognition</span>
           </button>
           <button class="btn btn-ghost" id="btn-cancel" disabled>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="6" y="6" width="12" height="12" rx="2"/></svg><span>取消</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="6" y="6" width="12" height="12" rx="2"/></svg><span data-i18n="btn.cancel">Cancel</span>
           </button>
           <div class="sp"></div>
           <button class="btn btn-ghost" id="btn-copy" disabled>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg><span>复制全文</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg><span data-i18n="btn.copy">Copy all</span>
           </button>
           <button class="btn btn-ghost" id="btn-save" disabled>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg><span>保存</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg><span data-i18n="btn.save">Save</span>
           </button>
           <button class="btn btn-ghost" id="btn-open-dir" disabled>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>打开输出文件夹</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span data-i18n="btn.openDir">Open output folder</span>
           </button>
         </div>
 
         <!-- 识别提示（可选 prompt）-->
         <div class="hint-head">
-          <div class="l"><span class="t">识别指令（可选）</span><span class="d">留空使用模型默认指令（文档解析）；可输入自定义指令微调输出</span></div>
+          <div class="l"><span class="t" data-i18n="ocr.promptTitle">Recognition prompt (optional)</span><span class="d" data-i18n="ocr.promptDesc">Leave empty for the model default (document parsing); type a custom prompt to fine-tune the output</span></div>
         </div>
-        <textarea class="input" id="prompt-box" placeholder="默认按文档解析输出 Markdown；例如输入“只提取表格”可聚焦表格内容"></textarea>
+        <textarea class="input" id="prompt-box" data-i18n-placeholder="ocr.promptPlaceholder" placeholder=""></textarea>
 
         <div class="progress" id="progress" hidden>
-          <div class="meta"><span class="s" id="prog-status">识别中</span><span class="p" id="prog-pct">0%</span></div>
+          <div class="meta"><span class="s" id="prog-status" data-i18n="prog.running">Recognizing</span><span class="p" id="prog-pct">0%</span></div>
           <div class="bar"><i id="prog-bar" style="width:0%"></i></div>
         </div>
 
         <!-- 识别结果 -->
         <div class="result" id="result" hidden>
-          <div class="sec-title">识别结果 <span class="chip chip-muted" id="result-meta"></span></div>
+          <div class="sec-title"><span data-i18n="result.title">Recognition result</span> <span class="chip chip-muted" id="result-meta"></span></div>
           <!-- 批量模式：逐文件结果列表（点击查看该文件内容） -->
           <div class="batch-list" id="batch-list" hidden></div>
           <!-- 页缩略图 + 分页标签（多页时） -->
@@ -115,8 +115,8 @@
           <div class="md-wrap">
             <div class="md-views">
               <div class="seg" id="result-mode">
-                <button class="on" data-v="rendered">预览</button>
-                <button data-v="raw">Markdown</button>
+                <button class="on" data-v="rendered" data-i18n="result.preview">Preview</button>
+                <button data-v="raw" data-i18n="result.raw">Markdown</button>
               </div>
             </div>
             <div class="md-render" id="md-render"></div>
@@ -126,7 +126,7 @@
 
         <!-- 最近识别 -->
         <div class="hint-head" id="history-head" hidden>
-          <div class="l"><span class="t">最近识别</span></div>
+          <div class="l"><span class="t" data-i18n="history.title">Recent results</span></div>
         </div>
         <div id="history-list" class="history-list" hidden></div>
 
@@ -135,61 +135,64 @@
 
       <!-- ───── 模型 ───── -->
       <section class="view" data-view="model">
-        <div class="sec-title">运行环境</div>
+        <div class="sec-title" data-i18n="model.envTitle">Runtime environment</div>
         <div id="env-panel" class="health-panel"></div>
 
-        <div class="sec-title">OCR 模型</div>
+        <div class="sec-title" data-i18n="model.section">OCR model</div>
         <div class="model-card">
           <div class="mc-head">
             <div class="mc-info">
               <div class="t">Unlimited-OCR-2 <span class="chip chip-accent">baidu · MIT</span></div>
-              <div class="d">百度开源长文档解析模型（约 3.3B 参数，MoE + 视觉编码器）。支持多页合并解析（跨页上下文）与单页动态切片，输出 Markdown。</div>
+              <div class="d" data-i18n="model.desc">Baidu's open-source long-document parsing model (~3.3B params, MoE + vision encoder). Supports multi-page merged parsing (cross-page context) and single-page dynamic slicing; outputs Markdown.</div>
             </div>
           </div>
           <div class="mc-meta" id="model-meta"></div>
 
           <div class="model-state-row">
-            <span class="chip" id="model-state-chip">检查中…</span>
+            <span class="chip" id="model-state-chip" data-i18n="model.checking">Checking…</span>
             <div class="sp"></div>
-            <button class="btn btn-ghost btn-sm" id="btn-model-unload" hidden>卸载模型</button>
+            <button class="btn btn-ghost btn-sm" id="btn-model-unload" hidden data-i18n="model.unload">Unload model</button>
           </div>
         </div>
 
         <div id="model-msg"></div>
 
         <div class="model-load-row" style="display:flex;align-items:center;gap:12px;margin-top:14px">
-          <button class="btn btn-primary" id="btn-model-download">下载模型（约 6.8 GB）</button>
-          <button class="btn btn-primary" id="btn-model-load" disabled>加载模型</button>
+          <button class="btn btn-primary" id="btn-model-download" data-i18n="model.download">Download model (~6.8 GB)</button>
+          <button class="btn btn-primary" id="btn-model-load" disabled data-i18n="model.load">Load model</button>
           <div class="progress" id="model-progress" hidden style="flex:1;margin:0">
-            <div class="meta"><span class="s" id="model-prog-status">准备中…</span><span class="p" id="model-prog-pct">0%</span></div>
+            <div class="meta"><span class="s" id="model-prog-status" data-i18n="model.preparing">Preparing…</span><span class="p" id="model-prog-pct">0%</span></div>
             <div class="bar"><i id="model-prog-bar" style="width:0%"></i></div>
           </div>
         </div>
 
         <div class="banner banner-info" style="margin-top:16px">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
-          <div>有 NVIDIA 显卡时自动用 CUDA + bfloat16（需安装 CUDA 版 PyTorch）；否则走 CPU（较慢：单页约 1–5 分钟，多页按页数累加）。推荐 16 GB 以上内存。</div>
+          <div data-i18n="model.cudaBanner">With an NVIDIA GPU, CUDA + bfloat16 is used automatically (requires the CUDA build of PyTorch); otherwise CPU is used (slower: ~1–5 min per page, multi-page scales with page count). 16 GB+ of RAM recommended.</div>
         </div>
       </section>
 
       <!-- ───── 设置 ───── -->
       <section class="view settings" data-view="settings">
         <div class="card">
-          <div class="row"><div class="label"><div class="t">模型下载位置</div><div class="d">Unlimited-OCR-2 的存储目录；留空＝程序目录下的 models/Unlimited-OCR-2</div></div>
-            <div class="with-browse"><input class="input mono" id="set-model-dir" placeholder="（留空＝默认位置）" style="width:260px;max-width:100%"><button class="btn btn-ghost btn-sm" id="btn-model-dir-browse">浏览…</button></div></div>
-          <div class="row"><div class="label"><div class="t">HuggingFace 镜像站</div><div class="d">直连 huggingface.co 较慢或失败时改用镜像（如 hf-mirror.com）</div></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.modelDir">Model download location</div><div class="d" data-i18n="set.modelDirDesc">Storage directory for Unlimited-OCR-2; empty = models/Unlimited-OCR-2 under the app folder</div></div>
+            <div class="with-browse"><input class="input mono" id="set-model-dir" data-i18n-placeholder="set.modelDirPlaceholder" placeholder="" style="width:260px;max-width:100%"><button class="btn btn-ghost btn-sm" id="btn-model-dir-browse" data-i18n="set.browse">Browse…</button></div></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.mirror">HuggingFace mirror</div><div class="d" data-i18n="set.mirrorDesc">Use a mirror (e.g. hf-mirror.com) when huggingface.co is slow or unreachable</div></div>
             <input class="input mono" id="set-mirror" placeholder="hf-mirror.com" style="width:200px;max-width:100%"></div>
-          <div class="row"><div class="label"><div class="t">推理设备</div><div class="d">auto＝有 NVIDIA 显卡用 CUDA，否则 CPU</div></div>
-            <div class="seg" id="set-device"><button data-v="auto" class="on">自动</button><button data-v="cuda">CUDA</button><button data-v="cpu">CPU</button></div></div>
-          <div class="row"><div class="label"><div class="t">输出格式</div><div class="d">识别结果自动保存的文件格式（保存按钮同样生效）</div></div>
-            <div class="seg" id="set-outfmt"><button data-v="md" class="on">Markdown</button><button data-v="txt">纯文本</button></div></div>
-          <div class="row"><div class="label"><div class="t">外观主题</div></div>
-            <div class="seg" id="set-theme"><button class="on" data-v="light">浅色</button><button data-v="dark">深色</button><button data-v="system">跟随系统</button></div></div>
-          <div class="row"><div class="label"><div class="t">界面缩放</div><div class="d">调整文字与控件大小</div></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.device">Inference device</div><div class="d" data-i18n="set.deviceDesc">auto = CUDA when an NVIDIA GPU is present, otherwise CPU</div></div>
+            <div class="seg" id="set-device"><button data-v="auto" class="on" data-i18n="set.deviceAuto">Auto</button><button data-v="cuda">CUDA</button><button data-v="cpu">CPU</button></div></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.outfmt">Output format</div><div class="d" data-i18n="set.outfmtDesc">File format for auto-saved results (the Save button follows it too)</div></div>
+            <div class="seg" id="set-outfmt"><button data-v="md" class="on">Markdown</button><button data-v="txt" data-i18n="set.outfmtTxt">Plain text</button></div></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.theme">Appearance</div></div>
+            <div class="seg" id="set-theme"><button class="on" data-v="light" data-i18n="set.themeLight">Light</button><button data-v="dark" data-i18n="set.themeDark">Dark</button><button data-v="system" data-i18n="set.themeSystem">Follow system</button></div></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.scale">UI scale</div><div class="d" data-i18n="set.scaleDesc">Adjust text and control size</div></div>
             <select class="select" id="set-scale"><option value="80">80%</option><option value="90">90%</option><option value="100" selected>100%</option><option value="110">110%</option><option value="125">125%</option><option value="150">150%</option></select></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.lang">Language</div><div class="d" data-i18n="set.langDesc">Interface language</div></div>
+            <!-- 选项由 JS 按 /api/settings 的 languages 动态填充（母语显示，不随界面语言翻译） -->
+            <select class="select" id="set-lang"></select></div>
         </div>
         <div class="card" style="margin-top:14px;display:flex;align-items:center;gap:12px">
-          <div class="label"><div class="t" style="font-size:13px">OCR 小工具 <span class="chip chip-muted" id="app-version">v—</span></div><div class="d">本地推理 · 数据不离开你的电脑</div></div>
+          <div class="label"><div class="t" style="font-size:13px"><span data-i18n="app.name">OCR MiniTool</span> <span class="chip chip-muted" id="app-version">v—</span></div><div class="d" data-i18n="about.desc">Local inference · your data never leaves this computer</div></div>
           <div class="sp" style="flex:1"></div>
         </div>
       </section>
@@ -200,7 +203,8 @@
 
 <input id="hidden-file" type="file" accept=".jpg,.jpeg,.png,.bmp,.webp,.tif,.tiff,.pdf" multiple style="display:none">
 <a id="download-link" style="display:none"></a>
-<script src="js/bridge.js?v=1"></script>
-<script src="js/app.js?v=1"></script>
+<script src="js/i18n.js?v=2"></script>
+<script src="js/bridge.js?v=2"></script>
+<script src="js/app.js?v=2"></script>
 </body>
 </html>

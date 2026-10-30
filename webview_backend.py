@@ -23,9 +23,10 @@ from pathlib import Path
 
 from applog import log_download, log_error, log_info, log_model, log_ocr
 from downloader import CancelledError, download_model, quick_check, set_mirror
+from i18n import available_languages, set_lang, tr
 from ocr_engine import EngineError, OcrEngine
 from settings_store import SettingsStore
-from version import APP_NAME_ZH, APP_VERSION
+from version import APP_VERSION
 
 # ── 路径（PyInstaller 冻结时在 EXE 旁）────────────────────────────
 if getattr(sys, "frozen", False):
@@ -45,6 +46,7 @@ DEFAULT_SETTINGS = {
     "outFormat": "md",     # 识别结果保存格式：md | txt
     "theme": "light",
     "scale": 100,
+    "lang": "en",          # 界面语言：en | zh | es（i18n.py / webview/js/i18n.js）
 }
 
 
@@ -63,6 +65,8 @@ class WebBackend:
         self.recognizing = False
         self._task_label = ""
         self.cancel_event = threading.Event()
+        # 界面语言（后端 SSE 进度/错误文案与原生对话框同语言）
+        set_lang(self._settings_raw().get("lang"))
         # 下载/加载期间用户改了设置 → 需要重读 mirror/model dir
         self._apply_mirror_from_settings()
         # 记录加载期快照：状态字段反映真正加载的设备/目录
@@ -99,6 +103,8 @@ class WebBackend:
                 "outFormat": cur.get("outFormat", "md"),
                 "theme": cur.get("theme", "light"),
                 "scale": cur.get("scale", 100),
+                "lang": cur.get("lang", "en"),
+                "languages": available_languages(),
                 "defaultModelDir": str(BASE_DIR / MODEL_SUBDIR)}
 
     def set_settings(self, patch: dict) -> dict:
@@ -112,6 +118,8 @@ class WebBackend:
         old_theme = self.persisted_theme()
         self.settings.update(patch)
         self._apply_mirror_from_settings()
+        if "lang" in patch:
+            set_lang(patch["lang"])
         new_theme = self.persisted_theme()
         if new_theme != old_theme and self._theme_cb:
             try:
@@ -147,7 +155,7 @@ class WebBackend:
         dev = self.engine.device_info()
         cur = self._settings_raw()
         return {
-            "appName": APP_NAME_ZH,
+            "appName": tr("app.name"),
             "version": APP_VERSION,
             "modelState": st,
             "modelDir": str(self._model_dir()),
@@ -177,9 +185,9 @@ class WebBackend:
     def start_download(self) -> dict:
         with self._lock:
             if self.downloading or self.loading or self.recognizing:
-                return {"ok": False, "error": "已有任务进行中"}
+                return {"ok": False, "error": tr("err.busy")}
             self.downloading = True
-            self._task_label = "下载模型"
+            self._task_label = tr("task.download")
         self.cancel_event.clear()
 
         def worker():
@@ -197,13 +205,15 @@ class WebBackend:
                 download_model(model_dir, progress_cb=cb,
                                cancel_check=self.cancel_event.is_set)
                 log_download(f"模型下载完成（{model_dir}，{time.time() - t0:.0f}s）")
-                self._emit("dl-progress", {"pct": 1.0, "status": "下载完成"})
+                self._emit("dl-progress", {"pct": 1.0, "status": tr("dl.done")})
             except CancelledError:
                 log_info("模型下载已取消")
-                self._emit("dl-progress", {"pct": 0, "status": "已取消（已下载部分保留，可续传）"})
+                self._emit("dl-progress",
+                           {"pct": 0, "status": tr("dl.cancelledResumable")})
             except Exception as e:
                 log_error("模型下载失败", exc=e)
-                self._emit("dl-progress", {"pct": 0, "status": f"下载失败：{e}"})
+                self._emit("dl-progress",
+                           {"pct": 0, "status": tr("dl.failed", err=e)})
             finally:
                 with self._lock:
                     self.downloading = False
@@ -217,11 +227,11 @@ class WebBackend:
     def start_load(self) -> dict:
         with self._lock:
             if self.loading or self.downloading or self.recognizing:
-                return {"ok": False, "error": "已有任务进行中"}
+                return {"ok": False, "error": tr("err.busy")}
             if not quick_check(self._model_dir()):
-                return {"ok": False, "error": "模型尚未下载，请先下载模型。"}
+                return {"ok": False, "error": tr("err.modelMissing")}
             self.loading = True
-            self._task_label = "加载模型"
+            self._task_label = tr("task.load")
         self.cancel_event.clear()
 
         def worker():
@@ -237,11 +247,13 @@ class WebBackend:
                 self._loaded_device = self.engine.device
                 log_model(f"模型加载完成（{self.engine.device}，"
                           f"{time.time() - t0:.0f}s）")
-                self._emit("load-progress", {"pct": 1.0, "status": "模型就绪"})
+                self._emit("load-progress",
+                           {"pct": 1.0, "status": tr("load.done")})
             except Exception as e:
                 log_error("模型加载失败", exc=e)
                 self.engine.report_error(str(e))
-                self._emit("load-progress", {"pct": 0, "status": f"加载失败：{e}"})
+                self._emit("load-progress",
+                           {"pct": 0, "status": tr("load.failed", err=e)})
             finally:
                 with self._lock:
                     self.loading = False
@@ -263,14 +275,14 @@ class WebBackend:
         """
         with self._lock:
             if self.recognizing or self.loading or self.downloading:
-                raise EngineError("已有任务进行中")
+                raise EngineError(tr("err.busy"))
             if not self.engine.ready:
-                raise EngineError("模型尚未加载，请先在「模型」页加载。")
+                raise EngineError(tr("err.modelNotLoaded"))
             paths = [Path(p) for p in (opts.get("paths") or [])]
             if not paths:
-                raise EngineError("没有可识别的文件")
+                raise EngineError(tr("err.noFiles"))
             self.recognizing = True
-            self._task_label = "识别中"
+            self._task_label = tr("task.ocr")
         self.cancel_event.clear()
         mode = "batch" if opts.get("mode") == "batch" else "merged"
 
@@ -283,18 +295,18 @@ class WebBackend:
             prompt = opts.get("prompt") or ""
             t0 = time.time()
             total = len(paths)
-            last = {"pct": 0.02, "stage": "识别中"}
+            last = {"pct": 0.02, "stage": tr("prog.running")}
 
             def _cb(stage, done, tot, elapsed):
                 pct = 0.05 + 0.9 * ((done / max(1, tot)) / max(1, total))
                 last["pct"] = min(pct, 0.97)
-                last["stage"] = (stage or "识别中").rstrip("…")
+                last["stage"] = (stage or tr("prog.running")).rstrip("…")
                 mins = elapsed / 60
-                extra = f"，已用时 {mins:.1f} 分钟" if mins >= 1 else \
-                    f"，已用时 {elapsed:.0f} 秒"
+                time_s = tr("time.min", m=f"{mins:.1f}") if mins >= 1 else \
+                    tr("time.sec", s=f"{elapsed:.0f}")
                 if progress_cb:
                     progress_cb(last["pct"],
-                                f"{last['stage']}{extra}（CPU 推理较慢属正常）")
+                                tr("prog.merged", stage=last["stage"], time=time_s))
 
             # 心跳：单次模型请求内部无法回报百分比，但流式钩子会累计已生成
             # 字数——每 5 秒刷新「已生成 N 字 + 已用时」，界面清晰可见进展。
@@ -306,8 +318,9 @@ class WebBackend:
                         chars = self.engine.generated_chars()
                         mins = (time.time() - t0) / 60
                         progress_cb(last["pct"],
-                                    f"{last['stage']}…已生成 {chars} 字，"
-                                    f"已用时 {mins:.1f} 分钟（CPU 推理较慢属正常）")
+                                    tr("prog.ticker", stage=last["stage"],
+                                       chars=chars,
+                                       time=tr("time.min", m=f"{mins:.1f}")))
 
             threading.Thread(target=_ticker, name="ocr-ticker",
                              daemon=True).start()
@@ -325,7 +338,7 @@ class WebBackend:
             log_ocr(f"识别完成：{name}（{len(result.get('pages', []))} 页，"
                     f"{elapsed:.0f}s）→ {out_path.name}")
             if progress_cb:
-                progress_cb(1.0, "完成")
+                progress_cb(1.0, tr("prog.done"))
             return {
                 "mode": "merged",
                 "text": result.get("text", ""),
@@ -338,7 +351,7 @@ class WebBackend:
             if self.cancel_event.is_set():
                 log_ocr("识别已取消")
                 if progress_cb:
-                    progress_cb(0, "已取消")
+                    progress_cb(0, tr("prog.cancelled"))
                 return {"text": "", "pages": [], "outPath": "",
                         "elapsed": 0, "cancelled": True}
             log_error("识别失败", exc=e)
@@ -385,8 +398,9 @@ class WebBackend:
                     chars = self.engine.generated_chars()
                     mins = (time.time() - t0) / 60
                     progress_cb(last["pct"],
-                                f"{last['label']}…已生成 {chars} 字，"
-                                f"已用时 {mins:.1f} 分钟（CPU 推理较慢属正常）")
+                                tr("prog.ticker", stage=last["label"],
+                                   chars=chars,
+                                   time=tr("time.min", m=f"{mins:.1f}")))
 
         threading.Thread(target=_ticker, name="ocr-batch-ticker",
                          daemon=True).start()
@@ -403,7 +417,7 @@ class WebBackend:
                 # 展示名用原始文件名（上传临时文件名 part_N_upload 不对外）
                 display = (names[i] if i < len(names) and names[i]
                            else path.name)
-                label = f"批量识别 第 {i + 1}/{total} 个：{display}"
+                label = tr("prog.batchItem", i=i + 1, n=total, name=display)
                 last["pct"] = 0.02 + 0.95 * (i / total)
                 last["label"] = label
                 _report()
@@ -413,11 +427,12 @@ class WebBackend:
                     frac = 0.05 + 0.9 * (done / max(1, tot))
                     last["pct"] = min(0.02 + 0.95 * ((_i + frac) / _n), 0.97)
                     mins = elapsed / 60
-                    extra = f"，已用时 {mins:.1f} 分钟" if mins >= 1 else \
-                        f"，已用时 {elapsed:.0f} 秒"
+                    time_s = tr("time.min", m=f"{mins:.1f}") if mins >= 1 else \
+                        tr("time.sec", s=f"{elapsed:.0f}")
                     if progress_cb:
                         progress_cb(last["pct"],
-                                    f"{label}…{stage}{extra}")
+                                    tr("prog.batchFile", label=label,
+                                       stage=stage, time=time_s))
 
                 try:
                     result = self.engine.recognize([path], prompt=prompt,
@@ -450,7 +465,8 @@ class WebBackend:
                                   "chars": 0})
 
             if progress_cb:
-                progress_cb(1.0, "完成" if not cancelled else "已取消")
+                progress_cb(1.0, tr("prog.cancelled") if cancelled
+                            else tr("prog.done"))
             done_n = sum(1 for it in items if it.get("ok"))
             log_ocr(f"批量识别结束：{done_n}/{total} 成功"
                     f"{'（已取消）' if cancelled else ''}，"
@@ -502,7 +518,7 @@ class WebBackend:
             lines = [name, ""] if len(pages) > 1 else []
             if len(pages) > 1:
                 for i, p in enumerate(pages):
-                    lines += [f"----- 第 {i + 1} 页 -----",
+                    lines += [tr("out.pageTxt", n=i + 1),
                               self._md_to_plain(p), ""]
             else:
                 lines += [self._md_to_plain(pages[0]), ""]
@@ -510,7 +526,7 @@ class WebBackend:
             lines = [f"# {name}", ""]
             if len(pages) > 1:
                 for i, p in enumerate(pages):
-                    lines += [f"## 第 {i + 1} 页", "", p.strip(), ""]
+                    lines += [tr("out.pageMd", n=i + 1), "", p.strip(), ""]
             else:
                 lines += [pages[0].strip(), ""]
         out.write_text("\n".join(lines), encoding="utf-8")
@@ -540,7 +556,7 @@ class WebBackend:
         """按文件名读取历史结果（防路径穿越：只允许 outputs/ 下的 .md/.txt）。"""
         p = self._history_path(name)
         if not p.is_file():
-            return {"ok": False, "error": "记录不存在"}
+            return {"ok": False, "error": tr("err.noRecord")}
         try:
             text = p.read_text(encoding="utf-8")
             return {"ok": True, "name": p.name, "text": text}
@@ -550,7 +566,7 @@ class WebBackend:
     def history_delete(self, name: str) -> dict:
         p = self._history_path(name)
         if not p.is_file():
-            return {"ok": False, "error": "记录不存在"}
+            return {"ok": False, "error": tr("err.noRecord")}
         try:
             recycle = self._recycle_file(p)
             return {"ok": True, "recycled": recycle}
@@ -595,10 +611,12 @@ class WebBackend:
         except Exception:
             return False
 
-    def browse_folder(self, start: str = "", title: str = "选择文件夹") -> dict:
+    def browse_folder(self, start: str = "", title: str = "") -> dict:
         try:
             import tkinter as tk
             from tkinter import filedialog
+            if not title:
+                title = tr("dlg.pickFolder")
             root = tk.Tk()
             root.withdraw()
             root.attributes("-topmost", True)

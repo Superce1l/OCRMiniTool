@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 
 from downloader import quick_check
+from i18n import tr
 from ocr_postprocess import PAGE_SPLIT_RE, to_gui_markdown
 
 DEFAULT_PROMPT = "Multi page parsing."   # 上游 vLLM 部署的默认指令
@@ -117,8 +118,7 @@ def _torch():
         import torch
         return torch
     except Exception as e:   # pragma: no cover
-        raise EngineError(
-            "未安装 PyTorch。请先安装依赖：pip install -r requirements.txt") from e
+        raise EngineError(tr("err.noTorch")) from e
 
 
 class OcrEngine:
@@ -184,7 +184,7 @@ class OcrEngine:
         """
         torch = _torch()
         if not self.files_ready():
-            raise EngineError("模型文件不完整，请先在「模型」页下载。")
+            raise EngineError(tr("err.modelIncomplete"))
 
         def _s(msg):
             if cb:
@@ -192,8 +192,8 @@ class OcrEngine:
 
         self._error = None
         if _transformers is None:
-            raise EngineError("未安装 transformers，请先安装依赖：pip install -r requirements.txt")
-        _s("加载 tokenizer…")
+            raise EngineError(tr("err.noTransformers"))
+        _s(tr("eng.loadingTokenizer"))
         AutoTokenizer = _transformers.AutoTokenizer
         AutoModel = _transformers.AutoModel
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -203,12 +203,12 @@ class OcrEngine:
         if device_pref == "cpu":
             device = "cpu"
         elif device_pref == "cuda" and not cuda_ok:
-            raise EngineError("设置了 CUDA 设备，但本机没有可用的 NVIDIA GPU。")
+            raise EngineError(tr("err.noCudaDevice"))
         else:
             device = "cuda" if cuda_ok else "cpu"
         _patch_tensor_cuda(device == "cpu")
 
-        _s(f"加载模型权重（{device} · bfloat16）…约 6.7 GB，请耐心等待")
+        _s(tr("eng.loadingWeights", device=device))
         t0 = time.time()
         model = AutoModel.from_pretrained(
             str(self.model_dir), trust_remote_code=True, use_safetensors=True,
@@ -230,7 +230,7 @@ class OcrEngine:
             self.model = model
             self.device = device
             self.ready = True
-        _s(f"模型就绪（{device}，耗时 {time.time() - t0:.0f}s）")
+        _s(tr("eng.readyInfo", device=device, secs=f"{time.time() - t0:.0f}"))
 
     # ── PDF → 页图 ───────────────────────────────────────────
     @staticmethod
@@ -240,8 +240,7 @@ class OcrEngine:
         try:
             import fitz   # pymupdf
         except Exception as e:
-            raise EngineError(
-                "识别 PDF 需要 pymupdf：pip install pymupdf") from e
+            raise EngineError(tr("err.noPymupdf")) from e
         pdf_path = Path(pdf_path)
         out_dir = Path(out_dir or pdf_path.parent)
         doc = fitz.open(str(pdf_path))
@@ -272,9 +271,9 @@ class OcrEngine:
         单张图片由 model.infer 的 gundam 动态切片处理。
         """
         if not self.ready:
-            raise EngineError("模型尚未加载。")
+            raise EngineError(tr("err.notLoaded"))
         if not image_paths:
-            raise EngineError("没有可识别的图片。")
+            raise EngineError(tr("err.noImages"))
         prompt = (prompt or "").strip() or DEFAULT_PROMPT
 
         cancel_event = cancel_event or self.cancel_event
@@ -298,26 +297,26 @@ class OcrEngine:
                     else:
                         expanded.append(p)
                 if not expanded:
-                    raise EngineError("没有可识别的页面（PDF 转换后为空）。")
+                    raise EngineError(tr("err.noPages"))
 
                 if len(expanded) == 1:
                     if progress_cb:
-                        progress_cb("识别中（gundam 模式）", 0, 1, 0.0)
+                        progress_cb(tr("eng.stageGundam"), 0, 1, 0.0)
                     text = self._infer([expanded[0]], prompt, crop_mode=crop_mode,
                                        max_new_tokens=max_new_tokens)
                     results = [to_gui_markdown(text)]
                     if progress_cb:
-                        progress_cb("识别完成", 1, 1, time.time() - t0)
+                        progress_cb(tr("prog.recognizeDone"), 1, 1, time.time() - t0)
                 else:
                     # 多页：合并为一次请求（模型的核心能力——跨页上下文）。
                     if progress_cb:
-                        progress_cb(f"多页合并解析（共 {len(expanded)} 页）", 0, 1, 0.0)
+                        progress_cb(tr("eng.stageMerged", n=len(expanded)), 0, 1, 0.0)
                     text = self._infer(expanded, prompt, crop_mode=False,
                                        max_new_tokens=max_new_tokens)
                     parts = [p for p in PAGE_SPLIT_RE.split(text) if p.strip()]
                     results = [to_gui_markdown(p) for p in parts] or [text.strip()]
                     if progress_cb:
-                        progress_cb("识别完成", 1, 1, time.time() - t0)
+                        progress_cb(tr("prog.recognizeDone"), 1, 1, time.time() - t0)
             finally:
                 for d in tmp_dirs:
                     try:
@@ -331,7 +330,7 @@ class OcrEngine:
 
         # 兜底：如果请求被取消（页间检查点），不假装完成
         if cancel_event.is_set():
-            raise EngineError("已取消")
+            raise EngineError(tr("prog.cancelled"))
         elapsed = time.time() - t0
         return {
             "text": "\n\n".join(
@@ -366,12 +365,13 @@ class OcrEngine:
                     out = self.model.infer(self.tokenizer, **kwargs)
                 return out if isinstance(out, str) else str(out)
             except OcrCancelledError:
-                raise EngineError("已取消")
+                raise EngineError(tr("prog.cancelled"))
             except EngineError:
                 raise
             except Exception as e:
                 self._error = f"{type(e).__name__}: {e}"
-                raise EngineError(f"推理失败：{type(e).__name__}: {e}") from e
+                raise EngineError(
+                    tr("err.inference", err=f"{type(e).__name__}: {e}")) from e
 
     @staticmethod
     def _strip_markers(text: str) -> str:

@@ -8,6 +8,10 @@
 (function () {
   "use strict";
 
+  // 文案：I18N 语言包就绪时用之；file:// 预览取不到语言包时回退中文原句
+  const tr = (k, params, fb) =>
+    (window.I18N && window.I18N.has(k)) ? window.I18N.t(k, params) : fb;
+
   // ── event bus ───────────────────────────────────────────
   const listeners = {};
   function on(ev, fn) { (listeners[ev] ||= new Set()).add(fn); return () => off(ev, fn); }
@@ -85,7 +89,9 @@
       Object.assign(MOCK.settings, patch); return MOCK.settings;
     },
     async browseFolder(start) {
-      if (MODE === "web") { try { return await apiPost("/api/browse-folder", { start }); } catch {} }
+      // 文件夹对话框标题用当前界面语言（后端缺省时按其后端语言兜底）
+      const title = tr("dlg.pickFolder", null, "选择文件夹");
+      if (MODE === "web") { try { return await apiPost("/api/browse-folder", { start, title }); } catch {} }
       return { ok: false, path: "" };
     },
     async openOutputDir() {
@@ -98,7 +104,7 @@
     },
     async startLoad() {
       if (MODE === "web") return apiPost("/api/load", {});
-      setTimeout(() => { emit("load-progress", { pct: 1, status: "模型就绪" }); emit("status", { modelState: "ready" }); }, 1200);
+      setTimeout(() => { emit("load-progress", { pct: 1, status: tr("load.done", null, "模型就绪") }); emit("status", { modelState: "ready" }); }, 1200);
       return { ok: true };
     },
     async cancel() {
@@ -129,12 +135,12 @@
   };
 
   async function webRecognize(opts) {
-    if (!opts.files || !opts.files.length) throw new Error("请先选择图片");
+    if (!opts.files || !opts.files.length) throw new Error(tr("mock.pickImage", null, "请先选择图片"));
     const fd = new FormData();
     for (const f of opts.files) fd.append("files", f, f.name);
     if (opts.prompt) fd.append("prompt", opts.prompt);
     if (opts.mode) fd.append("mode", opts.mode);
-    emit("progress", { pct: 2, status: "上传中…" });
+    emit("progress", { pct: 2, status: tr("prog.uploading", null, "上传中…") });
     const r = await fetch("/api/recognize", { method: "POST", body: fd });
     if (!r.ok) {
       let msg = "HTTP " + r.status;
@@ -150,13 +156,16 @@
   const MOCK = {
     cancelled: false,
     status: {
-      appName: "OCR 小工具", version: "1.0.0", modelState: "ready",
+      appName: "OCR MiniTool", version: "1.1.0", modelState: "ready",
       modelDir: "D:/OCRMiniTool/models/Unlimited-OCR-2", outDir: "D:/OCRMiniTool/outputs",
       modelError: null, loadedDevice: "cpu", devicePref: "auto", mirror: "",
       torch: "2.13.0+cpu", transformers: "4.52.1", cuda: false,
       cudaName: "", vramGb: 0, busy: false, busyLabel: "",
     },
-    settings: { modelDir: "", mirror: "", devicePref: "auto", theme: "light", scale: 100 },
+    settings: {
+      modelDir: "", mirror: "", devicePref: "auto", theme: "light", scale: 100, lang: "en",
+      languages: window.I18N ? window.I18N.LANGUAGES.slice() : [],
+    },
   };
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -164,39 +173,43 @@
     MOCK.cancelled = false;
     const batch = opts?.mode === "batch";
     const steps = [
-      [8, "上传完成"],
-      [30, batch ? "批量识别 第 1/2 个：示例.png，已用时 5 秒"
-                 : "识别中（gundam 模式），已用时 5 秒（CPU 推理较慢属正常）"],
-      [62, batch ? "批量识别 第 2/2 个：示例2.png，已用时 14 秒"
-                 : "识别中（gundam 模式），已用时 14 秒（CPU 推理较慢属正常）"],
-      [94, "识别完成"], [100, "完成"],
+      [8, tr("mock.uploaded", null, "上传完成")],
+      [30, batch ? tr("mock.batch1", null, "批量识别 第 1/2 个：示例.png，已用时 5 秒")
+                 : tr("mock.merged1", null, "识别中（gundam 模式），已用时 5 秒（CPU 推理较慢属正常）")],
+      [62, batch ? tr("mock.batch2", null, "批量识别 第 2/2 个：示例2.png，已用时 14 秒")
+                 : tr("mock.merged2", null, "识别中（gundam 模式），已用时 14 秒（CPU 推理较慢属正常）")],
+      [94, tr("prog.recognizeDone", null, "识别完成")], [100, tr("prog.done", null, "完成")],
     ];
     for (const [pct, status] of steps) {
-      if (MOCK.cancelled) throw new Error("已取消");
+      if (MOCK.cancelled) throw new Error(tr("mock.cancelled", null, "已取消"));
       await sleep(500);
       emit("progress", { pct, status });
     }
     if (batch) {
       return {
         mode: "batch", cancelled: false, total: 2, done: 2, elapsed: 18.2,
-        text: "示例结果",
+        text: tr("mock.mergedPage", null, "示例结果"),
         items: [
-          { name: "示例.png", ok: true, text: "## 示例标题\n\n这是**展示模式**的批量结果。", chars: 20, elapsed: 8.4 },
-          { name: "示例2.png", ok: true, text: "第二张图的识别结果。", chars: 10, elapsed: 9.1 },
+          { name: tr("mock.sampleFile", null, "示例.png"), ok: true, text: tr("mock.batchText1", null, "## 示例标题\n\n这是**展示模式**的批量结果。"), chars: 20, elapsed: 8.4 },
+          { name: tr("mock.sampleFile2", null, "示例2.png"), ok: true, text: tr("mock.batchText2", null, "第二张图的识别结果。"), chars: 10, elapsed: 9.1 },
         ],
       };
     }
     return {
       mode: "merged",
-      text: "# 示例识别结果\n\n这是**展示模式**的示例输出。",
-      pages: ["示例识别结果"],
+      text: tr("mock.mergedText", null, "# 示例识别结果\n\n这是**展示模式**的示例输出。"),
+      pages: [tr("mock.mergedPage", null, "示例识别结果")],
       outPath: "outputs/example.md", elapsed: 21.4, cancelled: false,
     };
   }
   async function mockDownload() {
     for (let p = 0; p <= 100; p += 4) {
       await sleep(160);
-      emit("dl-progress", { pct: p / 100, status: `下载 model-00001-of-00002.safetensors…  ${(p * 66).toFixed(0)} / 6600 MB` });
+      emit("dl-progress", {
+        pct: p / 100,
+        status: tr("mock.dlProgress", { done: (p * 66).toFixed(0) },
+          `下载 model-00001-of-00002.safetensors…  ${(p * 66).toFixed(0)} / 6600 MB`),
+      });
     }
     emit("status", { modelState: "downloaded" });
   }

@@ -19,6 +19,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from i18n import tr
+
 HF_OFFICIAL = "https://huggingface.co"
 REPO_ID = "baidu/Unlimited-OCR-2"
 HF_BASE = f"{HF_OFFICIAL}/{REPO_ID}/resolve/main"
@@ -244,7 +246,7 @@ def download_model(model_dir: Path, progress_cb=None, cancel_check=None,
     todo = missing_files(model_dir)
     if not todo:
         if progress_cb:
-            progress_cb(1.0, "所有文件已就绪")
+            progress_cb(1.0, tr("dl.allReady"))
         return
 
     # 按体量加权：权重分片占绝大部分；小文件均摊。先下小配置文件
@@ -261,7 +263,7 @@ def download_model(model_dir: Path, progress_cb=None, cancel_check=None,
         base_pct = idx / n
         span_pct = 1.0 / n
         if progress_cb:
-            progress_cb(base_pct, f"下载 {fname}…")
+            progress_cb(base_pct, tr("dl.file", name=fname))
 
         dest = model_dir / fname
 
@@ -271,7 +273,8 @@ def download_model(model_dir: Path, progress_cb=None, cancel_check=None,
                 tmb = total / 1_048_576
                 speed = ""
                 progress_cb(_b + _s * done / total,
-                            f"下载 {_f}…  {mb:.1f} / {tmb:.1f} MB{speed}")
+                            tr("dl.fileProgress", name=_f,
+                               mb=f"{mb:.1f}", tmb=f"{tmb:.1f}", speed=speed))
 
         # 单文件重试（网络抖动）：3 次退避，断点续传接续
         last_err: Exception | None = None
@@ -292,10 +295,10 @@ def download_model(model_dir: Path, progress_cb=None, cancel_check=None,
             raise last_err
 
         if progress_cb:
-            progress_cb(base_pct + span_pct, f"完成 {fname}")
+            progress_cb(base_pct + span_pct, tr("dl.fileDone", name=fname))
 
     if progress_cb:
-        progress_cb(1.0, "下载完成")
+        progress_cb(1.0, tr("dl.done"))
     log_download("Unlimited-OCR-2 下载完成")
 
 

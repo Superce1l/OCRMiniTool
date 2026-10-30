@@ -1,13 +1,16 @@
 /* ============================================================
-   app.js — OCR 小工具 前端逻辑
+   app.js — OCR MiniTool 前端逻辑
    版面交互骨架沿用 STTMiniTool：侧栏视图切换 + SSE 进度 + 状态点。
    视图：识别（拖图/多选 → 识别 → Markdown 结果）/ 模型 / 设置。
+   文案统一走 I18N.t()（语言文件 webview/locales/*.json，与后端共用）；
+   语言切换经 I18N.onChange → retranslate() 重渲染动态区域。
    ============================================================ */
 "use strict";
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const API = window.OCRApi;
+const t = (k, p) => window.I18N.t(k, p);
 
 const state = {
   view: "ocr",
@@ -15,6 +18,7 @@ const state = {
   running: false,
   mode: "merged",       // merged | batch
   lastResult: null,     // {text, pages, outPath, elapsed}
+  lastBatchResult: null, // 批量模式整包结果（语言切换重渲染用）
   batchItems: null,     // 批量模式的逐文件结果
   viewIndex: 0,         // 批量模式当前查看的 item 下标
   curPage: 0,
@@ -34,8 +38,8 @@ function fmtSize(n) {
 }
 function fmtTime(sec) {
   sec = Math.round(sec || 0);
-  if (sec < 60) return sec + " 秒";
-  return Math.floor(sec / 60) + " 分 " + (sec % 60) + " 秒";
+  if (sec < 60) return t("time.sec", { s: sec });
+  return t("time.minSec", { m: Math.floor(sec / 60), s: sec % 60 });
 }
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => (
@@ -46,7 +50,7 @@ function flash(msg) {
 }
 const logLines = [];
 function logLine(msg) {
-  const ts = new Date().toLocaleTimeString("zh-Hans", { hour12: false });
+  const ts = new Date().toLocaleTimeString(window.I18N.localeTag(), { hour12: false });
   logLines.push(`[${ts}] ${msg}`);
   if (logLines.length > 200) logLines.shift();
   const box = $("#ocr-log");
@@ -56,12 +60,14 @@ function logLine(msg) {
 }
 
 /* ── 视图切换 ─────────────────────────────────────────── */
-const VIEW_TITLES = { ocr: "图片识别", model: "模型与设备", settings: "设置" };
+function viewTitle(v) {
+  return { ocr: t("view.ocr"), model: t("view.model"), settings: t("view.settings") }[v] || v;
+}
 function switchView(v) {
   state.view = v;
   $$(".nav-item").forEach(b => b.classList.toggle("active", b.dataset.view === v));
   $$(".view").forEach(s => s.classList.toggle("active", s.dataset.view === v));
-  $("#view-title").textContent = VIEW_TITLES[v] || v;
+  $("#view-title").textContent = viewTitle(v);
 }
 $("#nav").addEventListener("click", e => {
   const b = e.target.closest(".nav-item");
@@ -82,6 +88,17 @@ function applyScale(pct) {
   document.documentElement.style.fontSize = (16 * (pct || 100) / 100) + "px";
 }
 
+/* ── 语言切换：静态属性已由 I18N.applyAll 重刷，这里补动态区域 ── */
+function retranslate() {
+  switchView(state.view);
+  renderFiles();
+  applyStatus(state.status);
+  if (state.batchItems && state.lastBatchResult) showBatchResult(state.lastBatchResult);
+  else if (state.lastResult) showResultPages();
+  refreshHistory();
+}
+window.I18N.onChange(retranslate);
+
 /* ── 状态（轮询 + SSE 合流）────────────────────────────── */
 function applyStatus(s) {
   if (!s) return;
@@ -94,21 +111,21 @@ function applyStatus(s) {
   dot.classList.remove("off", "loading", "error");
   dot.querySelector(".dot").style.background = "";
   if (st.modelState === "ready") {
-    txt.textContent = `已就绪 · ${st.loadedDevice === "cuda" ? "CUDA" : "CPU"}`;
+    txt.textContent = t("status.ready", { dev: st.loadedDevice === "cuda" ? "CUDA" : "CPU" });
   } else if (st.modelState === "loading" || st.modelState === "downloading") {
     dot.classList.add("loading");
-    txt.textContent = st.modelState === "loading" ? "模型加载中…" : "模型下载中…";
+    txt.textContent = st.modelState === "loading" ? t("status.loading") : t("status.downloading");
   } else if (st.modelState === "error") {
     dot.classList.add("error");
-    txt.textContent = "模型加载失败";
+    txt.textContent = t("status.error");
   } else if (st.modelState === "downloaded") {
     dot.classList.add("off");
-    txt.textContent = "模型未加载";
+    txt.textContent = t("status.notLoaded");
   } else {
     dot.classList.add("off");
-    txt.textContent = "模型未下载";
+    txt.textContent = t("status.notDownloaded");
   }
-  dot.title = `模型目录：${st.modelDir || ""}`;
+  dot.title = t("status.dirTip", { dir: st.modelDir || "" });
 
   $("#app-version").textContent = "v" + (st.version || "—");
   renderModelPage();
@@ -154,7 +171,7 @@ function addFiles(list) {
     if (!ok) { rejected++; continue; }
     state.files.push(f);
   }
-  if (rejected) flash(`已跳过 ${rejected} 个不支持的文件`);
+  if (rejected) flash(t("msg.skippedFiles", { n: rejected }));
   renderFiles();
 }
 
@@ -162,10 +179,10 @@ function renderFiles() {
   const box = $("#file-list");
   box.hidden = !state.files.length;
   box.innerHTML = state.files.map((f, i) => `
-    <span class="file-chip" title="${escapeHtml(f.name)}（${fmtSize(f.size)}）">
+    <span class="file-chip" title="${escapeHtml(t("result.fileTip", { name: f.name, size: fmtSize(f.size) }))}">
       <span class="fn">${escapeHtml(f.name.length > 40 ? f.name.slice(0, 38) + "…" : f.name)}</span>
       <span class="meta">${fmtSize(f.size)}</span>
-      <button class="x" data-i="${i}" title="移除">×</button>
+      <button class="x" data-i="${i}" title="${escapeHtml(t("result.remove"))}">×</button>
     </span>`).join("");
   renderRunButtons();
 }
@@ -182,16 +199,14 @@ $("#ocr-mode").addEventListener("click", e => {
   if (!b) return;
   state.mode = b.dataset.v;
   $$("#ocr-mode button").forEach(x => x.classList.toggle("on", x === b));
-  flash(state.mode === "batch"
-    ? "批量识别：每个文件独立识别、独立出结果（可混选图片和 PDF）"
-    : "合并解析：多个文件将作为同一文档的多页合并识别（跨页上下文）");
+  flash(state.mode === "batch" ? t("msg.modeBatch") : t("msg.modeMerged"));
 });
 
 /* ── 识别 ─────────────────────────────────────────────── */
 $("#btn-run").addEventListener("click", runOcr);
 $("#btn-cancel").addEventListener("click", async () => {
   await API.cancel();
-  flash("已请求取消，识别会在 1～2 秒内中断");
+  flash(t("msg.cancelRequested"));
 });
 
 async function runOcr() {
@@ -199,7 +214,7 @@ async function runOcr() {
   state.running = true;
   renderRunButtons();
   $("#progress").hidden = false;
-  setProgress(2, "上传中…");
+  setProgress(2, t("prog.uploading"));
   const prompt = $("#prompt-box").value.trim();
   try {
     const result = await API.recognize({
@@ -208,21 +223,25 @@ async function runOcr() {
     if (result && !result.cancelled) {
       if (result.mode === "batch" && result.items) {
         state.batchItems = result.items;
+        state.lastBatchResult = result;
         state.viewIndex = result.items.findIndex(it => it.ok);
         showBatchResult(result);
         const okN = result.done ?? result.items.filter(i => i.ok).length;
-        flash(`批量识别完成（${okN}/${result.items.length} 成功，${fmtTime(result.elapsed)}）`);
+        flash(t("msg.batchDone", {
+          ok: okN, total: result.items.length, time: fmtTime(result.elapsed),
+        }));
       } else {
         state.batchItems = null;
+        state.lastBatchResult = null;
         state.lastResult = result;
         state.viewIndex = 0;
         showResult(result);
-        flash(`识别完成（${fmtTime(result.elapsed)}）→ ${result.outPath || ""}`);
+        flash(t("msg.done", { time: fmtTime(result.elapsed), path: result.outPath || "" }));
       }
     }
   } catch (e) {
-    flash(`识别失败：${e.message || e}`);
-    setProgress(0, "失败");
+    flash(t("msg.failed", { err: e.message || e }));
+    setProgress(0, t("prog.failed"));
   } finally {
     state.running = false;
     renderRunButtons();
@@ -344,22 +363,25 @@ function showBatchResult(result) {
   box.hidden = false;
   box.innerHTML = items.map((it, i) => {
     const cls = it.ok ? "ok" : (it.skipped ? "skip" : "fail");
-    const badge = it.ok ? `<span class="chip chip-ok">完成</span>`
-      : it.skipped ? `<span class="chip chip-muted">未执行</span>`
-      : `<span class="chip chip-live">失败</span>`;
+    const badge = it.ok ? `<span class="chip chip-ok">${escapeHtml(t("chip.ok"))}</span>`
+      : it.skipped ? `<span class="chip chip-muted">${escapeHtml(t("chip.skipped"))}</span>`
+      : `<span class="chip chip-live">${escapeHtml(t("chip.fail"))}</span>`;
     const meta = it.ok
-      ? `${it.chars} 字 · ${fmtTime(it.elapsed)}`
+      ? escapeHtml(t("result.charsTime", { chars: it.chars, time: fmtTime(it.elapsed) }))
       : (it.error ? escapeHtml(it.error.slice(0, 80)) : "—");
     return `
       <button class="batch-item${i === state.viewIndex ? " on" : ""}" data-i="${i}">
         <span class="bn" title="${escapeHtml(it.name)}">${escapeHtml(it.name)}</span>
         ${badge}
         <span class="bm">${meta}</span>
-        <span class="bx">查看 ›</span>
+        <span class="bx">${escapeHtml(t("result.view"))}</span>
       </button>`;
   }).join("");
-  $("#result-meta").textContent =
-    `${result.done ?? items.filter(i => i.ok).length}/${items.length} 成功 · ${fmtTime(result.elapsed)}`;
+  $("#result-meta").textContent = t("result.batchMeta", {
+    done: result.done ?? items.filter(i => i.ok).length,
+    total: items.length,
+    time: fmtTime(result.elapsed),
+  });
   viewBatchItem(state.viewIndex);
 }
 
@@ -382,15 +404,16 @@ function showResultPages() {
   if (pages.length > 1) {
     tabs.hidden = false;
     tabs.innerHTML = pages.map((_, i) =>
-      `<button class="page-tab${i === state.curPage ? " on" : ""}" data-i="${i}">第 ${i + 1} 页</button>`).join("") +
-      `<button class="page-tab${state.curPage === -1 ? " on" : ""}" data-i="-1">全部</button>`;
+      `<button class="page-tab${i === state.curPage ? " on" : ""}" data-i="${i}">${escapeHtml(t("result.pageN", { n: i + 1 }))}</button>`).join("") +
+      `<button class="page-tab${state.curPage === -1 ? " on" : ""}" data-i="-1">${escapeHtml(t("result.allPages"))}</button>`;
   } else {
     tabs.hidden = true;
     tabs.innerHTML = "";
     state.curPage = 0;
   }
-  $("#result-meta").textContent =
-    `${pages.length || 1} 页 · ${fmtTime(r.elapsed)}`;
+  $("#result-meta").textContent = t("result.pageMeta", {
+    n: pages.length || 1, time: fmtTime(r.elapsed),
+  });
   renderResultText();
 }
 
@@ -422,12 +445,12 @@ $("#btn-copy").addEventListener("click", async () => {
     ? r.pages[state.curPage] : r.text;
   try {
     await navigator.clipboard.writeText(text);
-    flash("已复制到剪贴板");
+    flash(t("msg.copied"));
   } catch {
     const ta = document.createElement("textarea");
     ta.value = text; document.body.appendChild(ta);
     ta.select(); document.execCommand("copy"); ta.remove();
-    flash("已复制到剪贴板");
+    flash(t("msg.copied"));
   }
 });
 /* 纯文本导出：与后端 _md_to_plain 同规则的 JS 版 */
@@ -477,7 +500,7 @@ async function refreshHistory() {
     <button class="history-item" data-name="${escapeHtml(it.name)}">
       <span class="hn">${escapeHtml(it.name)}</span>
       <span class="hm">${fmtSize(it.size)}</span>
-      <span class="hx" data-del="${escapeHtml(it.name)}" role="button" aria-label="删除" tabindex="0">
+      <span class="hx" data-del="${escapeHtml(it.name)}" role="button" aria-label="${escapeHtml(t("history.delete"))}" tabindex="0">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
       </span>
     </button>`).join("");
@@ -487,7 +510,7 @@ $("#history-list").addEventListener("click", async e => {
   if (del) {
     e.stopPropagation();
     const name = del.dataset.del;
-    if (!confirm(`删除「${name}」？（移入回收站）`)) return;
+    if (!confirm(t("msg.confirmDelete", { name }))) return;
     await API.deleteHistory(name);
     refreshHistory();
     return;
@@ -499,7 +522,7 @@ $("#history-list").addEventListener("click", async e => {
     state.lastResult = { text: r.text, pages: [r.text], outPath: r.name, elapsed: 0 };
     state.curPage = 0;
     showResult(state.lastResult);
-    flash(`已载入 ${r.name}`);
+    flash(t("msg.loadedHistory", { name: r.name }));
   }
 });
 
@@ -513,23 +536,23 @@ function renderModelPage() {
   const tfOk = !!st.transformers;
   const cells = [
     {
-      title: "推理依赖",
+      title: t("env.deps"),
       items: [
-        { label: "PyTorch", ok: torchOk, detail: st.torch || "未安装" },
-        { label: "Transformers", ok: tfOk, detail: st.transformers || "未安装" },
+        { label: "PyTorch", ok: torchOk, detail: st.torch || t("env.notInstalled") },
+        { label: "Transformers", ok: tfOk, detail: st.transformers || t("env.notInstalled") },
       ],
     },
     {
-      title: "计算设备",
+      title: t("env.device"),
       items: [
-        { label: "CPU", ok: true, detail: "可用" },
-        { label: "CUDA GPU", ok: st.cuda, detail: st.cuda ? `${st.cudaName} · ${st.vramGb} GB` : "未检测到（用 CPU）" },
+        { label: "CPU", ok: true, detail: t("env.available") },
+        { label: "CUDA GPU", ok: st.cuda, detail: st.cuda ? `${st.cudaName} · ${st.vramGb} GB` : t("env.noCuda") },
       ],
     },
   ];
   $("#env-panel").innerHTML = cells.map(c => `
     <div class="health-core">
-      <div class="hc-title">${c.title}</div>
+      <div class="hc-title">${escapeHtml(c.title)}</div>
       ${c.items.map(i => `
         <div class="hc-item">
           <span class="hdot ${i.ok ? "hdot-green" : "hdot-yellow"}"></span>
@@ -541,27 +564,27 @@ function renderModelPage() {
   // 模型状态 chip
   const chip = $("#model-state-chip");
   const STATES = {
-    absent: ["chip-muted", "未下载"],
-    downloading: ["chip-warn", "下载中…"],
-    downloaded: ["chip-warn", "已下载 · 未加载"],
-    loading: ["chip-warn", "加载中…"],
-    ready: ["chip-ok", `已就绪（${st.loadedDevice === "cuda" ? "CUDA" : "CPU"}）`],
-    error: ["chip-live", "加载失败"],
+    absent: ["chip-muted", t("mstate.absent")],
+    downloading: ["chip-warn", t("mstate.downloading")],
+    downloaded: ["chip-warn", t("mstate.downloaded")],
+    loading: ["chip-warn", t("mstate.loading")],
+    ready: ["chip-ok", t("mstate.ready", { dev: st.loadedDevice === "cuda" ? "CUDA" : "CPU" })],
+    error: ["chip-live", t("mstate.error")],
   };
   const [cls, label] = STATES[st.modelState] || STATES.absent;
   chip.className = "chip " + cls;
   chip.textContent = label;
 
   $("#model-meta").innerHTML = `
-    <span>权重 ${"~6.7"} GB · BF16</span>
-    <span>目录 ${escapeHtml(shortPath(st.modelDir))}</span>
-    ${st.mirror ? `<span>镜像 ${escapeHtml(st.mirror)}</span>` : ""}`;
+    <span>${escapeHtml(t("model.metaWeights"))}</span>
+    <span>${escapeHtml(t("model.metaDir", { dir: shortPath(st.modelDir) }))}</span>
+    ${st.mirror ? `<span>${escapeHtml(t("model.metaMirror", { m: st.mirror }))}</span>` : ""}`;
 
   // 按钮
   const dl = $("#btn-model-download"), ld = $("#btn-model-load");
   dl.disabled = ["downloading", "loading"].includes(st.modelState) || !!st.busy;
   dl.textContent = st.modelState === "downloaded" || st.modelState === "ready"
-    ? "重新下载（校验缺失文件）" : "下载模型（约 6.8 GB）";
+    ? t("model.redownload") : t("model.download");
   ld.disabled = st.modelState !== "downloaded" || !!st.busy;
   $("#btn-model-unload").hidden = st.modelState !== "ready";
 
@@ -582,19 +605,19 @@ function shortPath(p, n = 46) {
 
 $("#btn-model-download").addEventListener("click", async () => {
   $("#model-progress").hidden = false;
-  setModelProgress(0, "准备下载…");
+  setModelProgress(0, t("model.prepDownload"));
   const r = await API.startDownload();
-  if (!r.ok) flash(r.error || "无法开始下载");
+  if (!r.ok) flash(r.error || t("msg.cannotDownload"));
 });
 $("#btn-model-load").addEventListener("click", async () => {
   $("#model-progress").hidden = false;
-  setModelProgress(5, "开始加载…");
+  setModelProgress(5, t("model.startLoad"));
   const r = await API.startLoad();
-  if (!r.ok) { flash(r.error || "无法开始加载"); $("#model-progress").hidden = true; }
+  if (!r.ok) { flash(r.error || t("msg.cannotLoad")); $("#model-progress").hidden = true; }
 });
 $("#btn-model-unload").addEventListener("click", async () => {
   // 卸载：暂以重启进程外的方式不支持 → 提示
-  flash("卸载模型将在重启程序后生效（当前版本不释放已加载权重）");
+  flash(t("msg.unloadHint"));
 });
 
 function setModelProgress(pct, status) {
@@ -605,6 +628,17 @@ function setModelProgress(pct, status) {
 }
 
 /* ── 设置页 ───────────────────────────────────────────── */
+// 语言下拉选项：优先用后端发现的 languages（扫 locales 目录），
+// 没有则退回 I18N.LANGUAGES 内置列表；选项按 code 去重后只在变化时重建
+let langOptionsSig = "";
+function renderLangOptions(langs) {
+  const list = Array.isArray(langs) && langs.length ? langs : window.I18N.LANGUAGES;
+  const sig = list.map(l => l.code).join(",");
+  if (sig === langOptionsSig) return;
+  langOptionsSig = sig;
+  $("#set-lang").innerHTML = list.map(l =>
+    `<option value="${escapeHtml(l.code)}">${escapeHtml(l.name)}</option>`).join("");
+}
 function fillSettings(s) {
   if (!s) return;
   state.settings = s;
@@ -614,8 +648,13 @@ function fillSettings(s) {
   $$("#set-device button").forEach(b => b.classList.toggle("on", b.dataset.v === (s.devicePref || "auto")));
   $$("#set-theme button").forEach(b => b.classList.toggle("on", b.dataset.v === (s.theme || "light")));
   $$("#set-outfmt button").forEach(b => b.classList.toggle("on", b.dataset.v === (s.outFormat || "md")));
+  renderLangOptions(s.languages);
+  $("#set-lang").value = s.lang || "en";
   applyTheme(s.theme || "light");
   applyScale(s.scale || 100);
+  // 语言变化：加载对应语言包并重渲染（后端文案由 set_settings 同步）
+  const wantLang = s.lang || "en";
+  if (window.I18N.lang !== wantLang) window.I18N.setLang(wantLang);
 }
 let saveTimer = null;
 function pushSettings(patch) {
@@ -625,7 +664,7 @@ function pushSettings(patch) {
     fillSettings(s);
     const st = await API.getStatus();
     applyStatus(st);
-    flash("设置已保存");
+    flash(t("msg.settingsSaved"));
   }, 250);
 }
 $("#set-model-dir").addEventListener("change", () => pushSettings({ modelDir: $("#set-model-dir").value.trim() }));
@@ -647,6 +686,7 @@ $("#set-theme").addEventListener("click", e => {
   const b = e.target.closest("button");
   if (b) pushSettings({ theme: b.dataset.v });
 });
+$("#set-lang").addEventListener("change", () => pushSettings({ lang: $("#set-lang").value }));
 
 /* ── SSE 事件 ─────────────────────────────────────────── */
 API.on("status", s => applyStatus(s));
@@ -677,11 +717,13 @@ if (!new URLSearchParams(location.search).get("native")) {
 (async function init() {
   await API.ready;
   try {
-    fillSettings(await API.getSettings());
+    const s = await API.getSettings();
+    await window.I18N.setLang(s.lang || "en");   // 先定语言再刷界面
+    fillSettings(s);
     applyStatus(await API.getStatus());
   } catch (e) {
     console.warn("init status failed", e);
   }
   refreshHistory();
-  flash(`OCR 小工具就绪（${API.mode === "web" ? "已连接本地服务" : "展示模式"}）`);
+  flash(API.mode === "web" ? t("msg.readyWeb") : t("msg.readyDemo"));
 })();

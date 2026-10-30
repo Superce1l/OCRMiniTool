@@ -27,6 +27,9 @@
 - ⏹️ **识别可中断**：流式解码 + 实时「已生成 N 字」，取消在 1～2 秒内生效
 - 🕘 **最近识别**：`outputs/` 产出列表，点击回填查看；删除进回收站
 - 🎨 **深浅色主题 + 界面缩放**
+- 🌍 **多语言界面**：English（默认）/ 中文 / Español，设置页下拉切换、即时生效；
+  文案集中于 `webview/locales/*.json`（前端与后端共用）——**新增语言只需丢一份
+  `<code>.json`**（含 `meta.nativeName` 母语名），下拉框自动出现新选项，无需改代码
 - 📜 **运行日志**：下载／加载／识别事件自动记录到 `logs/`
 
 ---
@@ -77,6 +80,7 @@
 | **输出格式** | 识别结果自动保存与「保存」按钮导出的文件格式：Markdown（`.md`）/ 纯文本（`.txt`） |
 | **外观主题** | 浅色／深色／跟随系统 |
 | **界面缩放** | 调整文字与控件大小 |
+| **界面语言** | 下拉选择（English 默认 / 中文 / Español…）；选项自动发现自 `webview/locales/`，持久化到 `settings.json` 的 `lang` |
 
 ---
 
@@ -102,10 +106,12 @@ ocr_engine.py           # Unlimited-OCR-2 推理引擎（transformers trust_remo
 ocr_postprocess.py      # 模型布局块输出 → Markdown（移植自上游 utils/process_unlimitedOCR2.py）
 downloader.py           # 模型下载（HF + 镜像、断点续传、完整性校验）
 settings_store.py       # settings.json 单点原子读写
+i18n.py                 # 后端多语言（读 webview/locales/*.json，SSE 文案/对话框）
 applog.py               # 运行日志
 proc_guard.py           # Windows Job Object（进程退出连带清理）
 version.py              # 版本单一事实来源
 webview/                # 前端（HTML / CSS / JS）
+webview/locales/        # 语言包 en / zh / es（前后端共用，加语言=加一份 JSON）
 assets/make_icon.py     # 图标生成（Pillow 绘制 → PNG/ICO）
 OCRMiniTool.spec        # PyInstaller onefile 打包配置
 runtime_hook_utf8.py    # 冻结运行时 UTF-8 / 证书修复钩子

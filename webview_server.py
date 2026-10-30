@@ -38,6 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from i18n import tr
 from webview_backend import WebBackend
 
 
@@ -314,8 +315,9 @@ class WebViewServer:
                         return self._json(server.backend.history_delete(body.get("name", "")))
                     if path == "/api/browse-folder":
                         body = self._read_json_body()
+                        # 标题空 → 后端按当前语言兜底（i18n.tr）
                         return self._json(server.backend.browse_folder(
-                            body.get("start", ""), body.get("title", "选择文件夹")))
+                            body.get("start", ""), body.get("title", "")))
                     if path == "/api/open-output":
                         return self._json({"ok": server.backend.open_output_dir()})
                     if path == "/api/shutdown":
@@ -391,14 +393,14 @@ class WebViewServer:
             def _recognize(self):
                 ctype = self.headers.get("Content-Type", "")
                 if "multipart/form-data" not in ctype or "boundary=" not in ctype:
-                    return self._err(400, "需以 multipart/form-data 上传 files")
+                    return self._err(400, tr("err.needMultipart"))
                 boundary = ctype.split("boundary=", 1)[1].strip().strip('"').encode()
                 try:
                     n = int(self.headers.get("Content-Length", 0))
                 except ValueError:
-                    return self._err(400, "缺少 Content-Length")
+                    return self._err(400, tr("err.noContentLength"))
                 if n <= 0:
-                    return self._err(400, "请求体为空")
+                    return self._err(400, tr("err.emptyBody"))
 
                 tmp_dir = Path(tempfile.mkdtemp(prefix="ocr_web_"))
                 # 解析、校验、识别任何一步退出都要清掉临时目录
@@ -407,10 +409,10 @@ class WebViewServer:
                         self.rfile, boundary, tmp_dir, n)
                     uploads = files.get("files") or files.get("file") or []
                     if not uploads:
-                        return self._err(400, "缺少 files 部件")
+                        return self._err(400, tr("err.noFilesPart"))
                     for _fname, p in uploads:
                         if not p.is_file() or p.stat().st_size == 0:
-                            return self._err(400, "上传内容为空")
+                            return self._err(400, tr("err.emptyUpload"))
 
                     # 保持前端给出的页序
                     paths = [str(p) for _fn, p in uploads]
