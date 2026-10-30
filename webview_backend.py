@@ -46,7 +46,7 @@ DEFAULT_SETTINGS = {
     "outFormat": "md",     # 识别结果保存格式：md | txt
     "theme": "light",
     "scale": 100,
-    "lang": "en",          # 界面语言：en | zh | es（i18n.py / webview/js/i18n.js）
+    "lang": "zh",          # 界面语言，默认中文（en | zh | es；i18n.py / i18n.js）
 }
 
 
@@ -103,7 +103,7 @@ class WebBackend:
                 "outFormat": cur.get("outFormat", "md"),
                 "theme": cur.get("theme", "light"),
                 "scale": cur.get("scale", 100),
-                "lang": cur.get("lang", "en"),
+                "lang": cur.get("lang", "zh"),
                 "languages": available_languages(),
                 "defaultModelDir": str(BASE_DIR / MODEL_SUBDIR)}
 

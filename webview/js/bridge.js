@@ -163,7 +163,7 @@
       cudaName: "", vramGb: 0, busy: false, busyLabel: "",
     },
     settings: {
-      modelDir: "", mirror: "", devicePref: "auto", theme: "light", scale: 100, lang: "en",
+      modelDir: "", mirror: "", devicePref: "auto", theme: "light", scale: 100, lang: "zh",
       languages: window.I18N ? window.I18N.LANGUAGES.slice() : [],
     },
   };

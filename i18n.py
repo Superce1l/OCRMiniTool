@@ -19,8 +19,8 @@ import sys
 import threading
 from pathlib import Path
 
-FALLBACK_LANG = "en"
-AVAILABLE_LANGS = ("en", "zh", "es")   # 内置保证项；更多语言丢一份 JSON 即接入
+FALLBACK_LANG = "zh"                   # 默认语言：中文
+AVAILABLE_LANGS = ("zh", "en", "es")   # 内置保证项；更多语言丢一份 JSON 即接入   # 内置保证项；更多语言丢一份 JSON 即接入
 
 _LOCALES_DIR_CANDIDATES = (
     # PyInstaller 冻结：webview/ → webview_assets/

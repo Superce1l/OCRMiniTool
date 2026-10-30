@@ -14,12 +14,12 @@
 window.I18N = (() => {
   "use strict";
 
-  const FALLBACK = "en";
+  const FALLBACK = "zh";   // 默认界面语言：中文
   // 兜底语言列表（后端不在时用；正常路径由 /api/settings 的 languages
   // 动态填充——后端扫 webview/locales/*.json，新语言丢一份 JSON 即接入）
   const LANGUAGES = [
-    { code: "en", name: "English" },
     { code: "zh", name: "中文" },
+    { code: "en", name: "English" },
     { code: "es", name: "Español" },
   ];
   let dict = {};
@@ -68,3 +68,11 @@ window.I18N = (() => {
     onChange(fn) { changeCbs.add(fn); return () => changeCbs.delete(fn); },
   };
 })();
+
+// 默认语言中文：在设置加载前先按默认语言渲染静态文案，减少闪烁
+const boot = () => window.I18N.setLang("zh");
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", boot, { once: true });
+} else {
+  boot();
+}

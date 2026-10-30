@@ -649,11 +649,11 @@ function fillSettings(s) {
   $$("#set-theme button").forEach(b => b.classList.toggle("on", b.dataset.v === (s.theme || "light")));
   $$("#set-outfmt button").forEach(b => b.classList.toggle("on", b.dataset.v === (s.outFormat || "md")));
   renderLangOptions(s.languages);
-  $("#set-lang").value = s.lang || "en";
+  $("#set-lang").value = s.lang || "zh";
   applyTheme(s.theme || "light");
   applyScale(s.scale || 100);
   // 语言变化：加载对应语言包并重渲染（后端文案由 set_settings 同步）
-  const wantLang = s.lang || "en";
+  const wantLang = s.lang || "zh";
   if (window.I18N.lang !== wantLang) window.I18N.setLang(wantLang);
 }
 let saveTimer = null;
@@ -718,7 +718,7 @@ if (!new URLSearchParams(location.search).get("native")) {
   await API.ready;
   try {
     const s = await API.getSettings();
-    await window.I18N.setLang(s.lang || "en");   // 先定语言再刷界面
+    await window.I18N.setLang(s.lang || "zh");   // 先定语言再刷界面
     fillSettings(s);
     applyStatus(await API.getStatus());
   } catch (e) {
