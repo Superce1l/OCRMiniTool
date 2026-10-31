@@ -344,6 +344,19 @@ def open_edge_app(url: str) -> subprocess.Popen | None:
 
 
 def main():
+    # ── MOTW 自清（onedir 发行版必需，必须最先执行）─────────────────────
+    #   发行 zip 解压时 Zone.Identifier 落到 _internal 的每个 DLL，.NET 拒载
+    #   带 MOTW 的程序集 → pythonnet/clr 失败、pywebview 静默回退 Edge。
+    #   onefile 时代 DLL 运行时解压到 %TEMP% 无 MOTW 天然免疫；onedir 改为
+    #   启动自清（详见 motw_unblock；与 run.bat 记的低完整性标签是两回事）。
+    #   放 main() 第一行、reexec 之前——重挂出的新进程会再跑一遍 main()，
+    #   幂等无害。
+    try:
+        from motw_unblock import unblock_app_files
+        unblock_app_files()
+    except Exception:
+        pass
+
     # 设置里指定了自定义 Python 解释器 → 先重挂再干别的（此时还没起 server、
     # 没自动加载模型，本进程拉起新进程后即刻退出）。
     reexec_if_custom_python()

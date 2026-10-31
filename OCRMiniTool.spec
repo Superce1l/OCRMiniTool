@@ -1,11 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
-# OCRMiniTool — PyInstaller onefile spec
+# OCRMiniTool — PyInstaller onedir spec
 #
-# 为什么 onefile 而非 onedir：受管工作区（D:\Project）里新建的文件会继承
-# 「低完整性」NTFS 标签，.NET 拒绝加载低完整性程序集 → onedir 的散装
-# pythonnet/clr_loader DLL 会在运行时炸掉 pywebview。onefile 把全部文件
-# 打进单个 exe，运行时解压到 %TEMP%\_MEIxxxx（用户进程创建，无标签）。
-# 另注意：exe 应放在 models/ 的父目录运行（BASE_DIR = exe 所在目录）。
+# 2.2.9 式改造（v1.1.2）：onefile → onedir。onefile 每次启动把整个运行时
+# （数百 MB，含 torch）解压到 %TEMP%\_MEIxxxx——启动慢 10～30 秒、C 盘被占、
+# 进程被强杀还留垃圾；onedir 的文件直接躺在 exe 旁（PyInstaller 6 的
+# _internal\ 布局），零解压。
+#
+# 当初选 onefile 的两个理由的现状：
+#   ① 终端用户的 MOTW（zip 解压的 Zone.Identifier 让 .NET 拒载程序集 →
+#      pywebview 炸）：motw_unblock.py 启动自清解决——在任何 clr 载入前
+#      DeleteFileW("<f>:Zone.Identifier")，用户目录可写、无需管理员。
+#   ② 受管工作区（D:\Project）新建文件的低完整性标签：开发机现象，与
+#      打包布局无关（源码运行同样中招），解法见 run.bat 顶部注释
+#      （icacls /setintegritylevel M，或把 dist 拷到工作区外运行）。
+#
+# 另注意：exe 应放在 models/ 的父目录运行（BASE_DIR = exe 所在目录）；
+# 发行 zip 压整个 OCRMiniTool\ 文件夹，解压即用。
 from PyInstaller.utils.hooks import collect_data_files, collect_all, collect_submodules, collect_dynamic_libs
 
 import os
@@ -58,20 +68,30 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,          # onedir：二进制／数据交给下面的 COLLECT
     name='OCRMiniTool',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['assets/icon.ico'],
+)
+
+# onedir 目录包：EXE 旁 + _internal\（PyInstaller 6 布局）。
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='OCRMiniTool',
     icon=['assets/icon.ico'],
 )

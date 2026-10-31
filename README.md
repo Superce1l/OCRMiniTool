@@ -109,11 +109,12 @@ settings_store.py       # settings.json 单点原子读写
 i18n.py                 # 后端多语言（读 webview/locales/*.json，SSE 文案/对话框）
 applog.py               # 运行日志
 proc_guard.py           # Windows Job Object（进程退出连带清理）
+motw_unblock.py         # 启动自清 Mark-of-the-Web（onedir 发行版必需）
 version.py              # 版本单一事实来源
 webview/                # 前端（HTML / CSS / JS）
 webview/locales/        # 语言包 en / zh / es（前后端共用，加语言=加一份 JSON）
 assets/make_icon.py     # 图标生成（Pillow 绘制 → PNG/ICO）
-OCRMiniTool.spec        # PyInstaller onefile 打包配置
+OCRMiniTool.spec        # PyInstaller onedir 打包配置
 runtime_hook_utf8.py    # 冻结运行时 UTF-8 / 证书修复钩子
 ```
 
@@ -123,12 +124,14 @@ runtime_hook_utf8.py    # 冻结运行时 UTF-8 / 证书修复钩子
 
 ### 打包 EXE（推荐）
 
-双击 `dist\OCRMiniTool.exe` 即可（单文件，无需安装 Python）。
+解压发行 zip 后进入 `OCRMiniTool\` 文件夹，双击 `OCRMiniTool.exe` 即可
+（无需安装 Python）。
 
 - **模型位置**：exe 会自动在其所在目录寻找 / 下载 `models\Unlimited-OCR-2`。
-  建议把 exe 放进一个独立文件夹（如 `D:\OCRMiniTool\`）再运行；
-  也可以在界面「设置 → 模型下载位置」指定任意已有模型目录。
-- **首次启动**：onefile 版需要解压运行时（约 10～30 秒），属正常。
+  建议把整个 `OCRMiniTool\` 文件夹放进一个独立目录（如 `D:\OCRMiniTool\`）
+  再运行；也可以在界面「设置 → 模型下载位置」指定任意已有模型目录。
+- **首次启动**：若 SmartScreen 提示，点「更多信息 → 仍要运行」即可——程序
+  启动时会自动解除锁定（清掉 zip 解压带来的 MOTW 标记），之后双击直接运行。
 - **数据文件**：`outputs\`（识别结果）、`logs\`（运行日志）、`settings.json`
   都生成在 exe 所在目录。
 
@@ -137,6 +140,8 @@ runtime_hook_utf8.py    # 冻结运行时 UTF-8 / 证书修复钩子
 ```bat
 pip install pyinstaller
 pyinstaller --noconfirm --distpath dist --workpath build OCRMiniTool.spec
+rem 产出 dist\OCRMiniTool\（exe + _internal\）；发行 zip 打整个文件夹：
+powershell -NoProfile -Command "Compress-Archive -Path dist\OCRMiniTool -DestinationPath dist\OCRMiniTool-v1.1.2-windows-x64.zip -Force"
 ```
 
 ### 源码执行
