@@ -88,6 +88,7 @@
   "env.notInstalled": "not installed",
   "env.available": "available",
   "env.noCuda": "not detected (using CPU)",
+  "env.interpreter": "Python interpreter",
 
   "mstate.absent": "Not downloaded",
   "mstate.downloading": "Downloading…",
@@ -116,6 +117,34 @@
   "set.scaleDesc": "Adjust text and control size",
   "set.lang": "Language",
   "set.langDesc": "Interface language",
+
+  "set.pyTitle": "Python interpreter",
+  "set.pyDesc": "The app normally runs in its bundled venv, whose PyTorch is CPU-only. Point it at another interpreter / venv (e.g. one with CUDA PyTorch); takes effect after an app restart",
+  "set.pyCustom": "Custom interpreter",
+  "set.pyCustomDesc": "Accepts python.exe or a venv folder; empty = default environment. Run a check before applying — applying restarts the app with this interpreter",
+  "set.pyCheck": "Check / apply",
+  "set.pyCheckDesc": "Check shows the target interpreter's torch / CUDA / transformers; Apply saves and restarts the app",
+  "set.pyCheckBtn": "Check",
+  "set.pyApplyBtn": "Apply & restart",
+  "set.pyResetBtn": "Use default",
+  "set.pyResult": "Check result",
+
+  "py.pathMissing": "Path does not exist: {path}",
+  "py.notVenvDir": "Not a venv directory (missing Scripts/python.exe): {path}",
+  "py.emptyPath": "Enter an interpreter path first (to restore the default, click \"Use default\")",
+  "py.checking": "Checking… (first torch import can take tens of seconds)",
+  "py.probeTimeout": "Probe timed out (>120 s); verify the interpreter works",
+  "py.probeFailed": "Probe failed: {err}",
+  "py.probeBadOutput": "Could not parse probe output (target process died)",
+  "py.cudaBuildNoGpu": "CUDA torch build, but no usable GPU ({build})",
+  "py.depsMissing": "⚠ torch / transformers incomplete — recognition will fail in this environment",
+  "py.depsOkHint": "Dependencies complete; you can apply & restart",
+  "py.confirmApply": "Restart the app with this interpreter?\n{path}\n\nContinue?",
+  "py.defaultEnv": "default environment",
+  "py.restarting": "Restarting the app with the new interpreter…",
+  "py.frozenUnsupported": "Interpreter switching is unavailable in the packaged build",
+  "py.sameInterpreter": "That interpreter is already in use",
+  "py.probeNotOk": "Dependency check failed: {err}",
 
   "about.desc": "Local inference · your data never leaves this computer",
 
@@ -183,6 +212,7 @@
   "err.emptyUpload": "Uploaded content is empty",
 
   "dlg.pickFolder": "Choose folder",
+  "dlg.pickPython": "Choose Python interpreter (python.exe)",
   "dlg.quitBody": "{label} is still running.\n\nQuitting now will interrupt it.\nQuit anyway?",
 
   "out.pageMd": "## Page {n}",

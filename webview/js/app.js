@@ -547,6 +547,7 @@ function renderModelPage() {
       items: [
         { label: "CPU", ok: true, detail: t("env.available") },
         { label: "CUDA GPU", ok: st.cuda, detail: st.cuda ? `${st.cudaName} · ${st.vramGb} GB` : t("env.noCuda") },
+        { label: t("env.interpreter"), ok: true, detail: shortPath(st.interpreter || "—") },
       ],
     },
   ];
@@ -650,6 +651,7 @@ function fillSettings(s) {
   $$("#set-outfmt button").forEach(b => b.classList.toggle("on", b.dataset.v === (s.outFormat || "md")));
   renderLangOptions(s.languages);
   $("#set-lang").value = s.lang || "zh";
+  renderPythonSettings(s);
   applyTheme(s.theme || "light");
   applyScale(s.scale || 100);
   // 语言变化：加载对应语言包并重渲染（后端文案由 set_settings 同步）
@@ -687,6 +689,105 @@ $("#set-theme").addEventListener("click", e => {
   if (b) pushSettings({ theme: b.dataset.v });
 });
 $("#set-lang").addEventListener("change", () => pushSettings({ lang: $("#set-lang").value }));
+
+/* ── 设置页：Python 解释器（issue #2）──────────────────── */
+const pyUI = {
+  checkedPath: null,     // null=未检测；否则为已通过检测的路径（""=恢复默认）
+  checking: false,
+  renderedPath: null,    // 已渲染进输入框的 pythonPath（避免任意设置保存清掉编辑）
+};
+function renderPythonSettings(s) {
+  // 冻结版（PyInstaller）无解释器概念：整卡隐藏
+  $("#py-card").hidden = !!s.frozen;
+  if (s.frozen) return;
+  $("#py-current").textContent = s.interpreter || "";
+  $("#py-current").title = s.interpreter || "";
+  const saved = s.pythonPath || "";
+  if (pyUI.renderedPath === null || pyUI.renderedPath !== saved) {
+    pyUI.renderedPath = saved;
+    $("#set-python-path").value = saved;
+    $("#btn-python-reset").hidden = !saved.trim();
+    pyUI.checkedPath = null;
+    $("#btn-python-apply").disabled = true;
+    $("#py-probe-row").hidden = true;
+    $("#py-probe-out").textContent = "";
+  }
+}
+function renderProbeResult(r) {
+  const out = $("#py-probe-out");
+  $("#py-probe-row").hidden = false;
+  if (!r.ok) {
+    out.innerHTML = `<span style="color:#b45309">${escapeHtml(r.error || "probe failed")}</span>`;
+    return;
+  }
+  const rows = [
+    ["Python", r.version || "—"],
+    ["PyTorch", r.torch || t("env.notInstalled")],
+    ["CUDA", r.torch ? (r.cuda
+      ? `${t("env.available")} · ${r.cudaName || ""} · ${r.vramGb || 0} GB`
+      : (r.cudaBuild ? t("py.cudaBuildNoGpu", { build: r.cudaBuild }) : t("env.noCuda")))
+      : "—"],
+    ["Transformers", r.transformers || t("env.notInstalled")],
+    ["pywebview", r.pywebview || t("env.notInstalled")],
+  ];
+  out.innerHTML = rows.map(([k, v]) =>
+    `<div><span style="opacity:.6">${escapeHtml(k)}:</span> ${escapeHtml(String(v))}</div>`).join("") +
+    (r.depsOk
+      ? `<div style="color:#15803d;margin-top:4px">${escapeHtml(t("py.depsOkHint"))}</div>`
+      : `<div style="color:#b45309;margin-top:4px">${escapeHtml(t("py.depsMissing"))}</div>`);
+}
+$("#btn-python-browse").addEventListener("click", async () => {
+  const r = await API.browseFile($("#set-python-path").value);
+  if (r.ok && r.path) {
+    $("#set-python-path").value = r.path;
+    pyUI.checkedPath = null;          // 路径变了，旧检测结果作废
+    $("#btn-python-apply").disabled = true;
+  }
+});
+// 手动改路径 → 已通过的检测结果作废，须重新「检测」
+$("#set-python-path").addEventListener("input", () => {
+  pyUI.checkedPath = null;
+  $("#btn-python-apply").disabled = true;
+});
+$("#btn-python-check").addEventListener("click", async () => {
+  if (pyUI.checking) return;
+  pyUI.checking = true;
+  pyUI.checkedPath = null;
+  $("#btn-python-check").disabled = true;
+  $("#btn-python-apply").disabled = true;
+  $("#py-probe-row").hidden = false;
+  $("#py-probe-out").textContent = t("py.checking");
+  try {
+    const r = await API.probePython($("#set-python-path").value.trim());
+    if (r.ok && r.depsOk) {
+      pyUI.checkedPath = r.path || $("#set-python-path").value.trim();
+      $("#btn-python-apply").disabled = false;
+    }
+    renderProbeResult(r);
+  } finally {
+    pyUI.checking = false;
+    $("#btn-python-check").disabled = false;
+  }
+});
+$("#btn-python-apply").addEventListener("click", async () => {
+  if (pyUI.checkedPath === null) return;
+  const path = pyUI.checkedPath;
+  if (!confirm(t("py.confirmApply", { path: path || t("py.defaultEnv") }))) return;
+  const r = await API.applyPython(path);
+  if (r.ok && r.restarting) {
+    $("#btn-python-apply").disabled = true;
+    flash(t("py.restarting"));
+  } else {
+    flash(r.error || t("msg.failed", { err: "apply-python" }));
+  }
+});
+$("#btn-python-reset").addEventListener("click", async () => {
+  // 恢复默认 = 清空 pythonPath 并重启回启动器选定的 venv
+  if (!confirm(t("py.confirmApply", { path: t("py.defaultEnv") }))) return;
+  const r = await API.applyPython("");
+  if (r.ok && r.restarting) flash(t("py.restarting"));
+  else flash(r.error || t("msg.failed", { err: "apply-python" }));
+});
 
 /* ── SSE 事件 ─────────────────────────────────────────── */
 API.on("status", s => applyStatus(s));

@@ -21,6 +21,7 @@ from pathlib import Path
 
 from i18n import tr
 from proc_guard import setup_kill_on_close_job
+from webview_backend import reexec_if_custom_python
 from webview_server import WebViewServer
 
 APP_NAME = "OCR MiniTool"     # main() 里按 settings.json 的 lang 经 i18n 重设
@@ -343,6 +344,10 @@ def open_edge_app(url: str) -> subprocess.Popen | None:
 
 
 def main():
+    # 设置里指定了自定义 Python 解释器 → 先重挂再干别的（此时还没起 server、
+    # 没自动加载模型，本进程拉起新进程后即刻退出）。
+    reexec_if_custom_python()
+
     # UTF-8 模式：避免简中 Windows（GBK）控制台 print 中文/符号出错
     os.environ.setdefault("PYTHONUTF8", "1")
 

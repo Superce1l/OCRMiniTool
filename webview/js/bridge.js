@@ -94,6 +94,19 @@
       if (MODE === "web") { try { return await apiPost("/api/browse-folder", { start, title }); } catch {} }
       return { ok: false, path: "" };
     },
+    async browseFile(start) {
+      const title = tr("dlg.pickPython", null, "选择 Python 解释器");
+      if (MODE === "web") { try { return await apiPost("/api/browse-file", { start, title }); } catch {} }
+      return { ok: false, path: "" };
+    },
+    async probePython(path) {
+      if (MODE === "web") { try { return await apiPost("/api/probe-python", { path }); } catch (e) { return { ok: false, error: String(e) }; } }
+      return { ok: true, path, version: "3.12.0", torch: "2.13.0+cu128", transformers: "4.52.1", pywebview: "6.0", cuda: true, cudaName: "NVIDIA GeForce RTX (mock)", vramGb: 8.0, depsOk: true };
+    },
+    async applyPython(path) {
+      if (MODE === "web") { try { return await apiPost("/api/apply-python", { path }); } catch (e) { return { ok: false, error: String(e) }; } }
+      return { ok: false, error: "mock" };
+    },
     async openOutputDir() {
       if (MODE === "web") { try { return await apiPost("/api/open-output", {}); } catch {} }
       return false;

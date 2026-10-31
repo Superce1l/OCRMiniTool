@@ -191,6 +191,21 @@
             <!-- 选项由 JS 按 /api/settings 的 languages 动态填充（母语显示，不随界面语言翻译） -->
             <select class="select" id="set-lang"></select></div>
         </div>
+        <!-- Python 解释器（源码运行时显示；冻结版隐藏） -->
+        <div class="card" id="py-card" style="margin-top:14px" hidden>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.pyTitle">Python interpreter</div><div class="d" data-i18n="set.pyDesc">The app normally runs in its bundled venv, whose PyTorch is CPU-only. Point it at another interpreter / venv (e.g. one with CUDA PyTorch); takes effect after an app restart</div></div>
+            <div class="mono" id="py-current" style="font-size:12px;max-width:320px;overflow-wrap:anywhere;text-align:right;opacity:.75"></div></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.pyCustom">Custom interpreter path</div><div class="d" data-i18n="set.pyCustomDesc">Accepts python.exe or a venv folder; leave empty to use the default. Run a check before applying — the app restarts into this interpreter</div></div>
+            <div class="with-browse"><input class="input mono" id="set-python-path" style="width:260px;max-width:100%" spellcheck="false"><button class="btn btn-ghost btn-sm" id="btn-python-browse" data-i18n="set.browse">Browse…</button></div></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.pyCheck">Check &amp; apply</div><div class="d" data-i18n="set.pyCheckDesc">Check shows the target interpreter's torch / CUDA / transformers; Apply saves and restarts the app</div></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn btn-ghost btn-sm" id="btn-python-check" data-i18n="set.pyCheckBtn">Check</button>
+              <button class="btn btn-primary btn-sm" id="btn-python-apply" data-i18n="set.pyApplyBtn" disabled>Apply &amp; restart</button>
+              <button class="btn btn-ghost btn-sm" id="btn-python-reset" data-i18n="set.pyResetBtn" hidden>Use default</button>
+            </div></div>
+          <div class="row" id="py-probe-row" hidden><div class="label"><div class="t" data-i18n="set.pyResult">Check result</div></div>
+            <div id="py-probe-out" class="mono" style="font-size:12px;max-width:340px;overflow-wrap:anywhere"></div></div>
+        </div>
         <div class="card" style="margin-top:14px;display:flex;align-items:center;gap:12px">
           <div class="label"><div class="t" style="font-size:13px"><span data-i18n="app.name">OCR MiniTool</span> <span class="chip chip-muted" id="app-version">v—</span></div><div class="d" data-i18n="about.desc">Local inference · your data never leaves this computer</div></div>
           <div class="sp" style="flex:1"></div>
@@ -204,7 +219,7 @@
 <input id="hidden-file" type="file" accept=".jpg,.jpeg,.png,.bmp,.webp,.tif,.tiff,.pdf" multiple style="display:none">
 <a id="download-link" style="display:none"></a>
 <script src="js/i18n.js?v=2"></script>
-<script src="js/bridge.js?v=2"></script>
-<script src="js/app.js?v=2"></script>
+<script src="js/bridge.js?v=3"></script>
+<script src="js/app.js?v=3"></script>
 </body>
 </html>

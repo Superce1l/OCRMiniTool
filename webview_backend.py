@@ -13,10 +13,12 @@ on_event 回调（webview_server 转成 SSE）推给前端：
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -47,7 +49,57 @@ DEFAULT_SETTINGS = {
     "theme": "light",
     "scale": 100,
     "lang": "zh",          # 界面语言，默认中文（en | zh | es；i18n.py / i18n.js）
+    "pythonPath": "",      # 自定义 Python 解释器（源码运行时）；空 = 启动器选择的 venv
 }
+
+# 首个启动进程（run.bat 选定的 venv python）写入环境变量；「恢复默认解释器」
+# 重启时回退到它——因为彼时本进程可能已重挂到自定义解释器，sys.executable
+# 不再是默认环境。
+BASE_PYTHON_ENV = "OCRMT_BASE_PYTHON"
+
+
+def reexec_if_custom_python():
+    """settings.json 配了 pythonPath 且 ≠ 当前解释器 → 重挂过去（源码运行）。
+
+    在任何重依赖 import 之前调用：本进程只负责拉起新进程后即刻退出。
+    新进程以 CREATE_BREAKAWAY_FROM_JOB 脱离 KILL_ON_JOB_CLOSE 的 Job（否则
+    本进程退出 = Job 关闭 = 新进程连带被杀）。目标解释器若缺依赖起不来，
+    控制台会显示其报错；把 settings.json 的 pythonPath 清空即可还原。
+    """
+    if getattr(sys, "frozen", False):
+        return
+    os.environ.setdefault(BASE_PYTHON_ENV, sys.executable)
+    try:
+        data = json.loads(
+            (BASE_DIR / "settings.json").read_text(encoding="utf-8"))
+        target = str(data.get("pythonPath") or "").strip()
+    except Exception:
+        return
+    if not target:
+        return
+    cur = Path(sys.executable).resolve()
+    tgt = Path(os.path.expandvars(target)).expanduser().resolve()
+    if sys.platform == "win32":
+        same = cur.as_posix().lower() == tgt.as_posix().lower()
+    else:
+        same = cur == tgt
+    if same or not tgt.is_file():
+        return
+    print(f"[OCR MiniTool] 按设置切换解释器：{sys.executable} → {target}")
+    # BREAKAWAY：脱离 KILL_ON_JOB_CLOSE 的 Job（否则本进程退出＝Job 关闭＝
+    # 新进程连带被杀）；不带 CREATE_NO_WINDOW，让新进程的控制台报错可见。
+    flags = subprocess.CREATE_BREAKAWAY_FROM_JOB if sys.platform == "win32" else 0
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    try:
+        subprocess.Popen([target] + [str(a) for a in sys.argv],
+                         creationflags=flags, close_fds=False)
+        os._exit(0)
+    except OSError as e:
+        print(f"[OCR MiniTool] 解释器切换失败（{e}），继续用当前解释器启动。")
 
 
 class WebBackend:
@@ -71,6 +123,9 @@ class WebBackend:
         self._apply_mirror_from_settings()
         # 记录加载期快照：状态字段反映真正加载的设备/目录
         self._loaded_device = None
+        # probe_python 结果短缓存（「检测→应用」两步复用；60s 失效，
+        # 用户中途给目标环境补装包后重新「检测」即可拿到新结果）
+        self._probe_cache = ("", 0.0, None)
 
     # ── 事件与设置 ───────────────────────────────────────────
     def _emit(self, event: str, payload: dict):
@@ -104,8 +159,12 @@ class WebBackend:
                 "theme": cur.get("theme", "light"),
                 "scale": cur.get("scale", 100),
                 "lang": cur.get("lang", "zh"),
+                "pythonPath": cur.get("pythonPath", ""),
                 "languages": available_languages(),
-                "defaultModelDir": str(BASE_DIR / MODEL_SUBDIR)}
+                "defaultModelDir": str(BASE_DIR / MODEL_SUBDIR),
+                # 源码运行才可切换解释器；PyInstaller 冻结版前端隐藏该设置
+                "frozen": bool(getattr(sys, "frozen", False)),
+                "interpreter": sys.executable}
 
     def set_settings(self, patch: dict) -> dict:
         patch = {k: v for k, v in (patch or {}).items() if k in DEFAULT_SETTINGS}
@@ -169,6 +228,8 @@ class WebBackend:
             "cuda": dev.get("cuda", False),
             "cudaName": dev.get("cudaName", ""),
             "vramGb": dev.get("vramGb", 0.0),
+            "interpreter": sys.executable,
+            "frozen": bool(getattr(sys, "frozen", False)),
             "busy": self.has_running_tasks(),
             "busyLabel": self._task_label or "",
         }
@@ -602,6 +663,170 @@ class WebBackend:
         except Exception:
             p.unlink(missing_ok=True)
             return False
+
+    # ── Python 解释器切换（源码运行；issue #2）────────────────
+    @staticmethod
+    def normalize_python_path(raw: str) -> str:
+        """用户输入 → python.exe 绝对路径。接受 exe 或 venv 根目录。
+
+        目录形式自动补 Scripts\\python.exe（Windows）/ bin/python（其他）；
+        路径不存在抛 EngineError，由调用方转成界面提示。
+        """
+        raw = (raw or "").strip().strip('"')
+        if not raw:
+            return ""
+        p = Path(os.path.expandvars(raw)).expanduser()
+        if not p.exists():
+            raise EngineError(tr("py.pathMissing", path=str(p)))
+        if p.is_dir():
+            exe = p / ("Scripts/python.exe" if sys.platform == "win32"
+                       else "bin/python")
+            if not exe.is_file():
+                raise EngineError(tr("py.notVenvDir", path=str(p)))
+            p = exe
+        return str(p.resolve())
+
+    def probe_python(self, raw: str) -> dict:
+        """隔离探测目标解释器：版本 + torch/CUDA + transformers + pywebview。
+
+        子进程用 -I（隔离模式）起，cwd 指向临时目录——不继承本项目目录，
+        也不会误加载用户 PYTHONPATH 上的同名模块。torch 冷导入可达数十秒，
+        超时放宽到 120s。返回 dict（含 error 字段＝探测失败说明）。
+        """
+        try:
+            exe = self.normalize_python_path(raw)
+        except EngineError as e:
+            return {"ok": False, "path": raw, "error": str(e)}
+        if not exe:
+            return {"ok": False, "path": "", "error": tr("py.emptyPath")}
+        cached = self._probe_cache
+        if cached[0] == exe and time.time() - cached[1] < 60:
+            return dict(cached[2])
+        code = (
+            "import json, sys\n"
+            "info = {'python': sys.executable,\n"
+            "         'version': sys.version.split()[0], 'ok': True}\n"
+            "for m, key in (('torch', 'torch'),\n"
+            "                ('transformers', 'transformers'),\n"
+            "                ('webview', 'pywebview')):\n"
+            "    try:\n"
+            "        mod = __import__(m)\n"
+            "        info[key] = getattr(mod, '__version__', '') or 'ok'\n"
+            "    except Exception:\n"
+            "        info[key] = ''\n"
+            "try:\n"
+            "    import torch\n"
+            "    info['cudaBuild'] = torch.version.cuda or ''\n"
+            "    info['cuda'] = bool(torch.cuda.is_available())\n"
+            "    info['cudaName'] = torch.cuda.get_device_name(0) if info['cuda'] else ''\n"
+            "    info['vramGb'] = round(torch.cuda.get_device_properties(0)"
+            ".total_memory / 1e9, 1) if info['cuda'] else 0.0\n"
+            "except Exception as e:\n"
+            "    info['cuda'] = False\n"
+            "    info['cudaBuild'] = ''\n"
+            "    info['probeError'] = type(e).__name__ + ': ' + str(e)[:200]\n"
+            "print(json.dumps(info))\n"
+        )
+        flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        try:
+            r = subprocess.run(
+                [exe, "-I", "-c", code], capture_output=True, timeout=120,
+                creationflags=flags, cwd=tempfile.gettempdir())
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "path": exe, "error": tr("py.probeTimeout")}
+        except OSError as e:
+            return {"ok": False, "path": exe, "error": str(e)}
+        if r.returncode != 0:
+            tail = (r.stderr or b"").decode("utf-8", errors="replace").strip()
+            return {"ok": False, "path": exe,
+                    "error": tr("py.probeFailed", err=tail.splitlines()[-1][:200]
+                                if tail else f"exit {r.returncode}")}
+        try:
+            info = json.loads(r.stdout.decode("utf-8", errors="replace")
+                              .strip().splitlines()[-1])
+        except Exception:
+            return {"ok": False, "path": exe, "error": tr("py.probeBadOutput")}
+        info["path"] = info.get("python", exe)
+        # 三件套齐全才算「可用于重启」：torch（含 CUDA 与否交给界面展示）、
+        # transformers、pywebview（缺了起不了原生窗口，仅降级 Edge）
+        info["depsOk"] = bool(info.get("torch")) and bool(info.get("transformers"))
+        self._probe_cache = (exe, time.time(), dict(info))
+        return info
+
+    def browse_file(self, start: str = "", title: str = "") -> dict:
+        """原生「选择文件」对话框（选 python.exe 用）。"""
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            if not title:
+                title = tr("dlg.pickPython")
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            try:
+                initial = str(start) if start and Path(start).exists() else str(BASE_DIR)
+                initialfile = Path(initial).name if Path(initial).suffix.lower() == ".exe" else ""
+                path = filedialog.askopenfilename(
+                    title=title, initialdir=initial,
+                    initialfile=initialfile,
+                    filetypes=[("Python", "python*.exe"), ("EXE", "*.exe"),
+                               ("All", "*.*")],
+                    parent=root)
+            finally:
+                root.destroy()
+            return {"ok": bool(path), "path": path or ""}
+        except Exception as e:
+            return {"ok": False, "path": "", "error": str(e)}
+
+    def apply_python(self, raw: str) -> dict:
+        """保存 pythonPath 并以目标解释器重启应用。
+
+        raw 为空 = 恢复默认（重启回启动器选定的 venv）。重启 = 先以
+        CREATE_BREAKAWAY_FROM_JOB 拉起新进程（本进程在 KILL_ON_JOB_CLOSE 的
+        Job 里，新进程若继承会被连带杀掉），应答返回后再退出本进程。
+        """
+        if getattr(sys, "frozen", False):
+            return {"ok": False, "error": tr("py.frozenUnsupported")}
+        try:
+            exe = self.normalize_python_path(raw)
+        except EngineError as e:
+            return {"ok": False, "error": str(e)}
+        if exe and os.path.normcase(exe) == os.path.normcase(sys.executable) \
+                and not self._settings_raw().get("pythonPath"):
+            return {"ok": False, "error": tr("py.sameInterpreter")}
+        # 依赖未过探测（前端「检测」按钮已跑过）也放行重启——探测是建议性
+        # 前置；但这里再拦一次「torch/transformers 双缺」的明显坏选择，
+        # 避免一键把应用重启进起不来的环境。
+        if exe:
+            probe = self.probe_python(exe)
+            if not probe.get("depsOk"):
+                return {"ok": False, "error": tr("py.probeNotOk", err=probe.get("error") or "")}
+        self.settings.update({"pythonPath": exe})
+        target = exe or os.environ.get(BASE_PYTHON_ENV, "") or sys.executable
+        log_info(f"切换 Python 解释器 → {target or '(默认)'}；重启进程")
+        threading.Thread(target=self._restart_into, args=(target,),
+                         name="python-restart", daemon=True).start()
+        return {"ok": True, "restarting": True, "pythonPath": exe}
+
+    def _restart_into(self, target_exe: str):
+        """拉起 target_exe 下的同参数新进程，然后硬退出本进程。"""
+        time.sleep(0.4)                       # 让 HTTP 应答先落到前端
+        argv = [target_exe] + [str(a) for a in sys.argv]
+        flags = subprocess.CREATE_BREAKAWAY_FROM_JOB \
+            if sys.platform == "win32" else 0
+        try:
+            subprocess.Popen(argv, creationflags=flags, close_fds=False)
+        except OSError as e:
+            # 拉不起来（多见于 Job 不容脱离）：不退出，保留当前会话；设置已
+            # 落盘，下次手动重启即按新解释器走（app_webview 的 reexec 检查）。
+            log_error("重启失败（新解释器进程未能启动），请手动重启应用", exc=e)
+            return
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os._exit(0)
 
     # ── 桌面辅助 ─────────────────────────────────────────────
     def open_output_dir(self) -> bool:

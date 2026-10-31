@@ -88,6 +88,7 @@
   "env.notInstalled": "no instalado",
   "env.available": "disponible",
   "env.noCuda": "no detectada (se usa la CPU)",
+  "env.interpreter": "Intérprete de Python",
 
   "mstate.absent": "Sin descargar",
   "mstate.downloading": "Descargando…",
@@ -116,6 +117,34 @@
   "set.scaleDesc": "Ajusta el tamaño del texto y los controles",
   "set.lang": "Idioma",
   "set.langDesc": "Idioma de la interfaz",
+
+  "set.pyTitle": "Intérprete de Python",
+  "set.pyDesc": "La app se ejecuta normalmente en su venv incluido, cuyo PyTorch es solo CPU. Apúntala a otro intérprete / venv (p. ej. uno con PyTorch CUDA); surte efecto tras reiniciar la app",
+  "set.pyCustom": "Intérprete personalizado",
+  "set.pyCustomDesc": "Acepta python.exe o una carpeta de venv; vacío = entorno predeterminado. Comprueba antes de aplicar — aplicar reinicia la app con este intérprete",
+  "set.pyCheck": "Comprobar / aplicar",
+  "set.pyCheckDesc": "Comprobar muestra torch / CUDA / transformers del intérprete destino; Aplicar guarda y reinicia la app",
+  "set.pyCheckBtn": "Comprobar",
+  "set.pyApplyBtn": "Aplicar y reiniciar",
+  "set.pyResetBtn": "Usar predeterminado",
+  "set.pyResult": "Resultado de la comprobación",
+
+  "py.pathMissing": "La ruta no existe: {path}",
+  "py.notVenvDir": "No es un directorio de venv (falta Scripts/python.exe): {path}",
+  "py.emptyPath": "Escribe antes una ruta de intérprete (para volver al predeterminado, pulsa \"Usar predeterminado\")",
+  "py.checking": "Comprobando… (la primera importación de torch puede tardar decenas de segundos)",
+  "py.probeTimeout": "Sonda agotada (>120 s); verifica que el intérprete funcione",
+  "py.probeFailed": "La sonda falló: {err}",
+  "py.probeBadOutput": "No se pudo analizar la salida de la sonda (el proceso murió)",
+  "py.cudaBuildNoGpu": "Build de torch CUDA, pero sin GPU utilizable ({build})",
+  "py.depsMissing": "⚠ torch / transformers incompletos — el reconocimiento fallará en este entorno",
+  "py.depsOkHint": "Dependencias completas; puedes aplicar y reiniciar",
+  "py.confirmApply": "¿Reiniciar la app con este intérprete?\n{path}\n\n¿Continuar?",
+  "py.defaultEnv": "entorno predeterminado",
+  "py.restarting": "Reiniciando la app con el nuevo intérprete…",
+  "py.frozenUnsupported": "El cambio de intérprete no está disponible en la build empaquetada",
+  "py.sameInterpreter": "Ese intérprete ya está en uso",
+  "py.probeNotOk": "La comprobación de dependencias falló: {err}",
 
   "about.desc": "Inferencia local · tus datos nunca salen de este equipo",
 
@@ -183,6 +212,7 @@
   "err.emptyUpload": "El contenido subido está vacío",
 
   "dlg.pickFolder": "Elegir carpeta",
+  "dlg.pickPython": "Elegir intérprete de Python (python.exe)",
   "dlg.quitBody": "{label} sigue en curso.\n\nSalir ahora lo interrumpirá.\n¿Salir de todos modos?",
 
   "out.pageMd": "## Página {n}",

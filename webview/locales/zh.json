@@ -88,6 +88,7 @@
   "env.notInstalled": "未安装",
   "env.available": "可用",
   "env.noCuda": "未检测到（用 CPU）",
+  "env.interpreter": "Python 解释器",
 
   "mstate.absent": "未下载",
   "mstate.downloading": "下载中…",
@@ -116,6 +117,34 @@
   "set.scaleDesc": "调整文字与控件大小",
   "set.lang": "界面语言",
   "set.langDesc": "界面显示语言",
+
+  "set.pyTitle": "Python 解释器",
+  "set.pyDesc": "应用默认运行在自带 venv 里，其 PyTorch 为 CPU 版。可指向其他解释器 / venv（例如装有 CUDA 版 PyTorch 的环境），重启应用后生效",
+  "set.pyCustom": "自定义解释器",
+  "set.pyCustomDesc": "可填 python.exe 或 venv 根目录；留空＝使用默认环境。应用前请先「检测」——应用会以该解释器重启",
+  "set.pyCheck": "检测 / 应用",
+  "set.pyCheckDesc": "检测显示目标解释器的 torch / CUDA / transformers 等信息；应用＝保存并重启",
+  "set.pyCheckBtn": "检测",
+  "set.pyApplyBtn": "应用并重启",
+  "set.pyResetBtn": "恢复默认",
+  "set.pyResult": "检测结果",
+
+  "py.pathMissing": "路径不存在：{path}",
+  "py.notVenvDir": "该目录不是 venv（缺少 Scripts/python.exe）：{path}",
+  "py.emptyPath": "请先填写解释器路径（恢复默认请点「恢复默认」）",
+  "py.checking": "检测中（首次导入 torch 可能需要数十秒）…",
+  "py.probeTimeout": "探测超时（>120s），请确认该解释器可用",
+  "py.probeFailed": "探测失败：{err}",
+  "py.probeBadOutput": "探测输出无法解析（目标进程异常退出）",
+  "py.cudaBuildNoGpu": "CUDA 版 torch，但无可用 GPU（{build}）",
+  "py.depsMissing": "⚠ torch / transformers 不全，重启到该环境将无法识别",
+  "py.depsOkHint": "依赖齐全，可「应用并重启」",
+  "py.confirmApply": "将以该解释器重启应用：\n{path}\n\n继续？",
+  "py.defaultEnv": "默认环境",
+  "py.restarting": "正在以新解释器重启应用…",
+  "py.frozenUnsupported": "打包版不支持切换解释器（内置运行时）",
+  "py.sameInterpreter": "该解释器就是当前正在使用的",
+  "py.probeNotOk": "依赖检测未通过：{err}",
 
   "about.desc": "本地推理 · 数据不离开你的电脑",
 
@@ -183,6 +212,7 @@
   "err.emptyUpload": "上传内容为空",
 
   "dlg.pickFolder": "选择文件夹",
+  "dlg.pickPython": "选择 Python 解释器（python.exe）",
   "dlg.quitBody": "{label}尚未完成。\n\n现在退出将中断该任务。\n确定要退出吗？",
 
   "out.pageMd": "## 第 {n} 页",

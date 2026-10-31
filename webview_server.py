@@ -21,8 +21,10 @@ Host/Origin 校验挡 DNS rebinding / 跨站 POST。
   POST /api/cancel          → 请求取消当前任务
   POST /api/history-read    → 读取一条历史结果的文本
   POST /api/history-delete  → 删除一条历史结果（移入回收站）
-  POST /api/browse-file     → 原生「选择文件」多选对话框
+  POST /api/browse-file     → 原生「选择文件」对话框
   POST /api/browse-folder   → 原生「选择文件夹」对话框
+  POST /api/probe-python    → 探测指定解释器的 torch/CUDA/transformers
+  POST /api/apply-python    → 保存 pythonPath 并以新解释器重启应用
   POST /api/open-output     → 打开输出文件夹
   POST /api/shutdown        → 结束进程
 """
@@ -318,6 +320,18 @@ class WebViewServer:
                         # 标题空 → 后端按当前语言兜底（i18n.tr）
                         return self._json(server.backend.browse_folder(
                             body.get("start", ""), body.get("title", "")))
+                    if path == "/api/browse-file":
+                        body = self._read_json_body()
+                        return self._json(server.backend.browse_file(
+                            body.get("start", ""), body.get("title", "")))
+                    if path == "/api/probe-python":
+                        body = self._read_json_body()
+                        return self._json(server.backend.probe_python(
+                            body.get("path", "")))
+                    if path == "/api/apply-python":
+                        body = self._read_json_body()
+                        return self._json(server.backend.apply_python(
+                            body.get("path", "")))
                     if path == "/api/open-output":
                         return self._json({"ok": server.backend.open_output_dir()})
                     if path == "/api/shutdown":

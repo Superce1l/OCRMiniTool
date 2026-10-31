@@ -158,6 +158,32 @@ python app_webview.py          # 启动 WebView 界面
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128 --force-reinstall
 ```
 
+> 一键启动（run.bat）首次运行会在 `%LOCALAPPDATA%\OCRMiniTool\venv` 建独立
+> venv（CPU 版 torch，不污染全局环境）。想用 CUDA 但不想动这个 venv，推荐
+> **另建一个环境 + 设置里切换解释器**，见下节。
+
+### 自定义 Python 解释器（CUDA 环境）
+
+应用锁定的运行环境里 torch 是 CPU 版，`设置 → Python 解释器` 可让应用改用
+其他解释器重启（检测 → 应用并重启，两步完成）：
+
+```bash
+# 1) 用 uv 建一个带 CUDA torch 的独立环境（不污染任何现有环境）
+uv venv --python 3.12 C:\venvs\ocr-cuda
+uv pip install --python C:\venvs\ocr-cuda\Scripts\python.exe -r requirements.txt
+uv pip install --python C:\venvs\ocr-cuda\Scripts\python.exe ^
+    torch torchvision --index-url https://download.pytorch.org/whl/cu128
+
+# 2) 应用设置页填 C:\venvs\ocr-cuda\Scripts\python.exe（或目录 C:\venvs\ocr-cuda）
+#    → 点「检测」确认 CUDA 可用 → 点「应用并重启」
+```
+
+- 恢复默认：设置页点「恢复默认」，或手动清空 settings.json 的 `pythonPath`。
+- 目标环境缺 torch / transformers 时「应用」会被拒绝，避免重启进一个起不来的环境。
+- 该功能仅源码运行有效；PyInstaller 打包版内置运行时，设置卡自动隐藏。
+- 注意：venv 建在受管理的目录（如 `D:\Project`）可能带 Low 完整性标签导致
+  pythonnet 无法加载（见 run.bat 顶部注释），建议建在用户目录下。
+
 ### 命令行下载模型（可选）
 
 ```bash
