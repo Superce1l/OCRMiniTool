@@ -169,7 +169,7 @@
   const MOCK = {
     cancelled: false,
     status: {
-      appName: "OCR MiniTool", version: "1.1.0", modelState: "ready",
+      appName: "OCR MiniTool", version: "1.1.1", modelState: "ready",
       modelDir: "D:/OCRMiniTool/models/Unlimited-OCR-2", outDir: "D:/OCRMiniTool/outputs",
       modelError: null, loadedDevice: "cpu", devicePref: "auto", mirror: "",
       torch: "2.13.0+cpu", transformers: "4.52.1", cuda: false,
