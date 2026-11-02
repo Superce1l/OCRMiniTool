@@ -101,6 +101,8 @@
   "env.noteNoNv": "本机未检测到 NVIDIA 显卡，装了也无法用 GPU",
   "env.noteOldDriver": "驱动 {driver} 低于 CUDA 12.8 要求的 {min}，请先升级 NVIDIA 驱动",
   "env.dlProgress": "已下载 {done}/{total} MB",
+  "env.dlPartProgress": "分卷 {part}/{total}：已下载 {done}/{tmb} MB",
+  "env.concatProgress": "分卷拼接中…",
   "env.extractProgress": "解压安装中…",
   "env.done": "推理引擎就绪（torch {ver}），可直接加载模型",
   "env.cancelled": "已取消（重新下载可续传）",

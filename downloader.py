@@ -276,6 +276,10 @@ _TORCH_FLAVORS: dict[str, dict] = {
     "cu128": {
         "zip": f"ocrmini-runtime-torch{_TORCH_VERSION}-cu128.zip",
         "size_mb": 3300,
+        # GitHub Release 单资产上限 2GB → CUDA 包按定长分卷发布
+        # （.zip.part01-of-2 / .part02-of-2）；下载端逐卷断点续传后二进制
+        # 拼接（内容即原 zip，sha256 对账不变）。
+        "parts": 2,
         "label_key": "env.flavor.cu128",
         "desc_key": "env.flavor.cu128Desc",
     },
@@ -476,20 +480,68 @@ def download_torch(flavor: str, progress_cb=None, cancel_check=None,
             return cur
 
     url = f"{_TORCH_REL_BASE}/{meta['zip']}"
-    zip_path = RUNTIME_DIR / (meta["zip"] + ".part")
     final_zip = RUNTIME_DIR / meta["zip"]
-    if final_zip.exists() and not zip_path.exists():
-        zip_path = final_zip        # 上次已完整下载但未装完：直接复用
-    was_part = zip_path.suffix == ".part"
-    _download_file(url, zip_path,
-                   progress_cb=lambda done, total: progress_cb(
-                       0.9 * done / total, tr("env.dlProgress",
-                                              done=done // 1_048_576,
-                                              total=max(total // 1_048_576, 1)))
-                   if (progress_cb and total) else None,
-                   cancel_check=cancel_check)
-    if was_part:
-        zip_path.rename(final_zip)   # .part 残档 → 正式名（重命名文件本身）
+    n_parts = meta.get("parts", 1)
+
+    if n_parts == 1:
+        # 单文件：.part 断点续传，完成后改正式名
+        zip_path = RUNTIME_DIR / (meta["zip"] + ".part")
+        if final_zip.exists() and not zip_path.exists():
+            zip_path = final_zip    # 上次已完整下载但未装完：直接复用
+        was_part = zip_path.suffix == ".part"
+        _download_file(url, zip_path,
+                       progress_cb=lambda done, total: progress_cb(
+                           0.9 * done / total, tr("env.dlProgress",
+                                                  done=done // 1_048_576,
+                                                  total=max(total // 1_048_576, 1)))
+                       if (progress_cb and total) else None,
+                       cancel_check=cancel_check)
+        if was_part:
+            zip_path.rename(final_zip)   # .part 残档 → 正式名（重命名文件本身）
+    else:
+        # 分卷资产（GitHub 单资产上限 2GB）：逐卷断点续传 → 二进制拼接。
+        # 已下完整的卷再次请求 Range 时服务器回 416 → _download_file 视为
+        # 成功跳过，天然支持「断点在任意卷」；拼接中途中断则 .concat 作废
+        # 重拼（卷本身完好，不重下）。
+        part_files = []
+        for i in range(1, n_parts + 1):
+            pname = f"{meta['zip']}.part{i:02d}-of-{n_parts}"
+            pdest = RUNTIME_DIR / pname
+            if not pdest.exists():
+                _download_file(f"{_TORCH_REL_BASE}/{pname}", pdest,
+                               progress_cb=lambda done, total, _i=i: progress_cb(
+                                   0.9 * ((_i - 1) + done / total) / n_parts,
+                                   tr("env.dlPartProgress",
+                                      part=_i, total=n_parts,
+                                      done=done // 1_048_576,
+                                      tmb=max(total // 1_048_576, 1)))
+                               if (progress_cb and total) else None,
+                               cancel_check=cancel_check)
+            part_files.append(pdest)
+        concat = RUNTIME_DIR / (meta["zip"] + ".concat.part")
+        if progress_cb:
+            progress_cb(0.9, tr("env.concatProgress"))
+        with open(concat, "wb") as out:
+            done = 0
+            for pf in part_files:
+                with open(pf, "rb") as src:
+                    while True:
+                        if cancel_check is not None and cancel_check():
+                            raise CancelledError(pf.name)
+                        chunk = src.read(1 << 23)      # 8 MB
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        done += len(chunk)
+                        if progress_cb:
+                            progress_cb(0.9 + 0.05 * done / max(meta["size_mb"] * 1_048_576, 1),
+                                        tr("env.concatProgress"))
+        concat.rename(final_zip)
+        for pf in part_files:
+            try:
+                pf.unlink(missing_ok=True)             # 拼接完删分卷（共 3GB+ 不留盘）
+            except OSError:
+                pass
     zip_path = final_zip
 
     if progress_cb:

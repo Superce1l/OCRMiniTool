@@ -101,6 +101,8 @@
   "env.noteNoNv": "No NVIDIA GPU detected on this machine — installing this won't enable GPU",
   "env.noteOldDriver": "Driver {driver} is below {min} required by CUDA 12.8 — update your NVIDIA driver first",
   "env.dlProgress": "Downloaded {done}/{total} MB",
+  "env.dlPartProgress": "Part {part}/{total}: downloaded {done}/{tmb} MB",
+  "env.concatProgress": "Concatenating parts…",
   "env.extractProgress": "Extracting & installing…",
   "env.done": "Engine ready (torch {ver}) — you can load the model now",
   "env.cancelled": "Cancelled (resume by downloading again)",
