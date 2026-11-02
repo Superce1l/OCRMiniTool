@@ -87,9 +87,16 @@ def _make_hooked_streamer(base_cls):
 # 让 import torch 命中外部组件而非冻结 PYZ／venv；目录不存在时是空操作
 # （dev 环境走 venv 的 torch）。进程中途装完组件也要生效：重扫 sys.path。
 def _ensure_runtime_path():
-    """runtime/ 组件目录存在 → 插到 sys.path 最前并刷新模块查找缓存。"""
-    from downloader import RUNTIME_DIR
-    if str(RUNTIME_DIR) in sys.path or not (RUNTIME_DIR / "torch").is_dir():
+    """runtime/ 组件目录存在且安装标记落地 → 插到 sys.path 最前并刷新缓存。
+
+    必须以标记为准：解压中途/残缺的 torch 目录（如清理被占用半删）一旦
+    上 sys.path，import torch 会得到命名空间包或半残模块——静默失败比
+    干脆的 ModuleNotFoundError 更难排查（实测 AttributeError 实录）。
+    """
+    from downloader import RUNTIME_DIR, installed_torch_info
+    if str(RUNTIME_DIR) in sys.path \
+            or not (RUNTIME_DIR / "torch").is_dir() \
+            or installed_torch_info() is None:
         return
     sys.path.insert(0, str(RUNTIME_DIR))
     if sys.platform == "win32":
@@ -226,13 +233,14 @@ class OcrEngine:
         import importlib.util as _ilu
         if 'torch' not in sys.modules:
             spec = _ilu.find_spec("torch")
-            if spec is None:
+            if spec is None or not spec.origin:
                 return info
-            # 组件解压进行中 find_spec 也会命中（torch/__init__.py 早期落
-            # 地），此时导入只会半途失败并毒化 transformers 的可用性缓存
-            # （它以这次导入为准）。runtime 来源必须等安装标记落地。
-            origin = spec.origin or ""
-            if origin.startswith(str(RUNTIME_DIR)) \
+            # ① 组件解压进行中 find_spec 也会命中（torch/__init__.py 早期落
+            #    地），此时导入只会半途失败并毒化 transformers 的可用性缓存
+            #    （它以这次导入为准）→ runtime 来源必须等安装标记落地。
+            # ② 命名空间包（无 origin，如残缺的 runtime/torch 目录）同样
+            #    不可信——import 会成功但没有 __version__（实测 AttributeError）。
+            if spec.origin.startswith(str(RUNTIME_DIR)) \
                     and installed_torch_info() is None:
                 return info
         frozen = bool(getattr(sys, "frozen", False))
@@ -256,9 +264,13 @@ class OcrEngine:
                     info["vramGb"] = round(props.total_memory / 1e9, 1)
                 except Exception:
                     pass
-        except EngineError:
+        except Exception as e:
+            # 捕一切：torch 半残/命名空间包等怪状态下 AttributeError 之类
+            # 不该把 /api/status 打成 500。留痕后按「不可用」呈现。
             if frozen:
                 device_info._torch_fail_at = time.time()
+            from applog import log_error
+            log_error("device_info 探测 torch 异常", exc=e)
         return info
 
     _torch_fail_at = 0.0   # 冻结环境 import torch 最近失败时刻（负缓存）

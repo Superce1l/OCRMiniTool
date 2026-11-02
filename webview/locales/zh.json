@@ -68,6 +68,8 @@
   "chip.fail": "失败",
 
   "model.envTitle": "运行环境",
+  "model.engineTitle": "推理引擎（PyTorch 运行时）",
+  "model.engineDesc": "安装包不含 PyTorch——按显卡选择组件下载一次即可。NVIDIA 显卡用户选 CUDA 版。",
   "model.section": "OCR 模型",
   "model.desc": "百度开源长文档解析模型（约 3.3B 参数，MoE + 视觉编码器）。支持多页合并解析（跨页上下文）与单页动态切片，输出 Markdown。",
   "model.checking": "检查中…",
@@ -95,6 +97,7 @@
   "env.unsuitable": "不适用",
   "env.recommended": "推荐",
   "env.installedChip": "已装 {flavor} · torch {ver}",
+  "env.torchMismatch": "与组件版本 {pin} 不一致，建议安装组件或调整环境",
   "env.pickFirst": "请先选择一个推理引擎组件",
   "env.recommendNv": "检测到 NVIDIA 显卡（{gpu}）",
   "env.recommendCpu": "未检测到 NVIDIA 显卡",

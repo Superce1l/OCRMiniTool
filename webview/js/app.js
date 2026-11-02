@@ -535,13 +535,23 @@ function renderModelPage() {
   if (!st) return;
 
   // 运行环境自检
+  // PyTorch 行与组件卡片同口径：显示的是引擎实际将加载的 torch；来源用
+  // envInstalled（组件标记）区分——venv 环境与组件钉定版本不一致时标黄并
+  // 给出口径说明，避免「推理依赖 2.11 / 组件卡 2.8」各说各话（用户反馈实录）。
   const torchOk = !!st.torch;
   const tfOk = !!st.transformers;
+  const fromComponent = !!(st.envInstalled && st.torch);
+  const pin = st.torchPin || (st.envInstalled || {}).torch || "";
+  const torchMismatch = !!st.torch && !!pin && !String(st.torch).startsWith(pin);
+  const torchDetail = st.torch
+    ? (st.torch + (fromComponent ? "" : " · venv")
+       + (torchMismatch ? ` — ${t("env.torchMismatch", { pin })}` : ""))
+    : t("env.notInstalled");
   const cells = [
     {
       title: t("env.deps"),
       items: [
-        { label: "PyTorch", ok: torchOk, detail: st.torch || t("env.notInstalled") },
+        { label: "PyTorch", ok: torchOk && !torchMismatch, detail: torchDetail },
         { label: "Transformers", ok: tfOk, detail: st.transformers || t("env.notInstalled") },
       ],
     },

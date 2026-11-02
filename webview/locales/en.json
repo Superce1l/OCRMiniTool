@@ -68,6 +68,8 @@
   "chip.fail": "Failed",
 
   "model.envTitle": "Runtime environment",
+  "model.engineTitle": "Inference engine (PyTorch runtime)",
+  "model.engineDesc": "The app ships without PyTorch — pick the runtime matching your hardware and download it once. NVIDIA GPU users should choose CUDA.",
   "model.section": "OCR model",
   "model.desc": "Baidu's open-source long-document parsing model (~3.3B params, MoE + vision encoder). Supports multi-page merged parsing (cross-page context) and single-page dynamic slicing; outputs Markdown.",
   "model.checking": "Checking…",
@@ -95,6 +97,7 @@
   "env.unsuitable": "Not applicable",
   "env.recommended": "Recommended",
   "env.installedChip": "Installed {flavor} · torch {ver}",
+  "env.torchMismatch": "differs from component version {pin} — install the component or adjust your environment",
   "env.pickFirst": "Select an inference engine component first",
   "env.recommendNv": "NVIDIA GPU detected ({gpu})",
   "env.recommendCpu": "No NVIDIA GPU detected",

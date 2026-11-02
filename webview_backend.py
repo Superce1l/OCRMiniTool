@@ -24,8 +24,9 @@ import time
 from pathlib import Path
 
 from applog import log_download, log_error, log_info, log_model, log_ocr
-from downloader import (CancelledError, download_model, installed_torch_info,
-                        quick_check, quick_check_torch, set_mirror)
+from downloader import (CancelledError, _TORCH_VERSION, download_model,
+                        installed_torch_info, quick_check, quick_check_torch,
+                        set_mirror)
 from i18n import available_languages, set_lang, tr
 from ocr_engine import EngineError, OcrEngine
 from settings_store import SettingsStore
@@ -231,6 +232,7 @@ class WebBackend:
             "torchFlavor": cur.get("torchFlavor", ""),
             "envInstalled": installed_torch_info(),
             "envDownloading": self.env_downloading,
+            "torchPin": _TORCH_VERSION,
             "torch": dev.get("torch"),
             "transformers": dev.get("transformers"),
             "cuda": dev.get("cuda", False),
