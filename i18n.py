@@ -4,9 +4,9 @@
 后端（本模块）读同一份，保证两侧文案一致。后端负责所有经 SSE 推给前端的
 进度/错误文案，以及原生对话框（退出确认、选择文件夹）。
 
-语言存于 settings.json 的 "lang"（en | zh | es；缺省 en）。WebBackend 在
+语言存于 settings.json 的 "lang"（en | zh；缺省 zh）。WebBackend 在
 构造时和 set_settings 时调用 set_lang 同步。auto 值按系统 UI 语言解析
-（zh* → zh，es* → es，其余 → en）。
+（zh* → zh，其余 → en）。
 
 frozen（PyInstaller onefile）时语言文件在 _MEIPASS/webview_assets/locales
 （webview/ 整目录被打包为 webview_assets，见 *.spec datas）。
@@ -20,7 +20,7 @@ import threading
 from pathlib import Path
 
 FALLBACK_LANG = "zh"                   # 默认语言：中文
-AVAILABLE_LANGS = ("zh", "en", "es")   # 内置保证项；更多语言丢一份 JSON 即接入   # 内置保证项；更多语言丢一份 JSON 即接入
+AVAILABLE_LANGS = ("zh", "en")         # 内置保证项；更多语言丢一份 JSON 即接入
 
 _LOCALES_DIR_CANDIDATES = (
     # PyInstaller 冻结：webview/ → webview_assets/
@@ -66,7 +66,7 @@ class _SafeParams(dict):
 
 
 def detect_lang() -> str:
-    """系统 UI 语言 → 支持的语言（zh* → zh，es* → es，其余 → en）。"""
+    """系统 UI 语言 → 支持的语言（zh* → zh，其余 → en）。"""
     code = ""
     try:
         if sys.platform == "win32":
@@ -86,8 +86,6 @@ def detect_lang() -> str:
     code = (code or "").lower()
     if code.startswith("zh"):
         return "zh"
-    if code.startswith("es"):
-        return "es"
     return "en"
 
 
@@ -123,7 +121,7 @@ def available_languages() -> list[dict]:
 
 
 def set_lang(lang: str | None) -> str:
-    """设置当前语言（en | zh | es | locales/ 里的任意语言；auto 按系统语言解析）。
+    """设置当前语言（en | zh | locales/ 里的任意语言；auto 按系统语言解析）。
 
     未知语言（目录里也没有对应 JSON）回退 en。
     """

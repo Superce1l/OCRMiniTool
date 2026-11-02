@@ -16,9 +16,25 @@
 #
 # 另注意：exe 应放在 models/ 的父目录运行（BASE_DIR = exe 所在目录）；
 # 发行 zip 压整个 OCRMiniTool\ 文件夹，解压即用。
-from PyInstaller.utils.hooks import collect_data_files, collect_all, collect_submodules, collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_data_files, collect_all, collect_submodules
 
 import os
+
+# ── 构建预检（issue #3 的最终答案）───────────────────────────────
+# 安装包本体不含 torch/torchvision（连 CPU 版也不带）：使用者按硬件在
+# 「模型」页下载推理引擎组件（cpu / cu128，见 downloader._TORCH_FLAVORS
+# 与 build_components.py）。这条预检防止构建 venv 里的 torch 悄悄混进包：
+#   • 正确姿势：构建 venv 不装 torch（或设 OCRMIT_ALLOW_BUNDLED_TORCH=1
+#     硬绕过——Analysis 仍会排除，只为兼容旧构建脚本）。
+#   • 历史：v1.1.2 把构建机默认源装来的 CPU 版 torch 打进包（4.4G 的
+#     cu128 全量包是 issue #3 修复过程的中间产物，已废弃）。
+import importlib.util as _ilu
+if _ilu.find_spec("torch") and os.environ.get("OCRMIT_ALLOW_BUNDLED_TORCH") != "1":
+    raise SystemExit(
+        "[OCRMiniTool] 拒绝打包：构建 venv 里装着 torch——安装包不再内置 "
+        "torch（用户在模型页按硬件自选下载）。请在不带 torch 的环境打包，"
+        "或设 OCRMIT_ALLOW_BUNDLED_TORCH=1 硬绕过（仍会被排除）。")
+
 datas = [
     ('assets/icon.ico', '.'),
     ('webview', 'webview_assets'),
@@ -39,16 +55,30 @@ for pkg in ('webview', 'pythonnet', 'clr_loader', 'tokenizers', 'pymupdf'):
 # deepseek_v3、qwen3……），transformers 钩子不收录 → 运行时 No module
 # named。直接收录 transformers.models 全部子模块，一劳永逸。
 hiddenimports += collect_submodules('transformers.models')
-# torchvision 0.29+ 的 C++ 扩展改名 _C_stable.pyd / image_stable.pyd（stable
-# ABI 版），PyInstaller 钩子仍找旧名 _C → 不会收集 → 运行时报
-# "operator torchvision::nms does not exist"。显式补上扩展与图像 DLL。
-import importlib.util as _ilu
-_tv_dir = os.path.dirname(_ilu.find_spec('torchvision').origin)
-for _pyd in ('_C_stable.pyd', 'image_stable.pyd'):
-    _p = os.path.join(_tv_dir, _pyd)
-    if os.path.exists(_p):
-        binaries.append((_p, 'torchvision'))
-binaries += collect_dynamic_libs('torchvision')
+# torch 运行时组件（runtime/，非打包）会用到的 stdlib 冷门模块：torch 被
+# 排除后 PyInstaller 看不到它的 import 图，stdlib 只打包应用自身用到的。
+# 组件在冻结环境里 import torch 时就会缺件（首个翻车案例：timeit——
+# torch/_strobelight/cli_function_profiler.py 顶层 import）。宁可多列，
+# 每个几十 KB。
+hiddenimports += [
+    'timeit', 'shlex', 'getopt', 'fnmatch', 'glob', 'pickle', 'copyreg',
+    'shutil', 'zipfile', 'gzip', 'bz2', 'lzma', 'tarfile', 'sqlite3',
+    'csv', 'configparser', 'uuid', 'ipaddress', 'secrets', 'base64',
+    'binascii', 'struct', 'array', 'queue', 'selectors', 'socket',
+    'dataclasses', 'numbers', 'decimal', 'fractions', 'random', 'bisect',
+    'heapq', 'textwrap', 'string', 'inspect', 'linecache', 'tokenize',
+    'token', 'keyword', 'dis', 'difflib', 'weakref', 'contextvars',
+    'platform', 'tempfile',
+    # unittest.mock：torch/distributed/_config_module 顶层 `from unittest
+    # import mock`；PyInstaller 只收 unittest 本体不带 mock 子模块
+    'unittest', 'unittest.mock', 'unittest.async_case',
+    # torch/transformers/torchvision 全量 import 图扫描后 PYZ/base 仍缺的
+    # stdlib（stdlib_scan 法：无 torch 的 venv 里导入 runtime 组件，收集
+    # sys.modules ∩ stdlib，与 PYZ-00.toc/base_library.zip 差集）。select/
+    # struct/unicodedata/pyexpat 是 C 扩展 .pyd，hiddenimports 会一并收二进制。
+    'pickletools', 'select', 'struct', 'unicodedata', 'pyexpat',
+    'cProfile', 'profile', 'pstats', 'modulefinder',
+]
 
 a = Analysis(
     ['app_webview.py'],
@@ -59,7 +89,10 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=['runtime_hook_utf8.py'],
-    excludes=[],
+    # torch/torchvision 一律不打包：ocr_engine 在运行时把 runtime/ 组件
+    # 目录插到 sys.path 最前（见 downloader._TORCH_FLAVORS）。这里显式
+    # 排除，防止经 transformers 等模块的静态 import 引用被顺手收集。
+    excludes=['torch', 'torchvision', 'torchgen', 'functorch'],
     noarchive=False,
     optimize=0,
 )

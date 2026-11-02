@@ -13,8 +13,10 @@ pywebview>=6.0
 # 导致原生窗口起不来（实测本机复现；3.1.0 + pywebview 6.2.1 组合正常）。
 pythonnet==3.1.0
 
-# 推理引擎（GPU 用户请自行安装 CUDA 版 torch：
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128 ）
+# 推理引擎。注意：Windows 上 pip 默认源装到的是 CPU 版 torch（检测不到
+# 任何 NVIDIA GPU）。要用 GPU（或要打包发行版，见 issue #3），必须先走
+# CUDA 源覆盖安装：
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 torch>=2.5
 torchvision>=0.20
 

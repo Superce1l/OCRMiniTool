@@ -25,9 +25,14 @@
 - 📝 **结果预览 + 导出**：Markdown 实时渲染 / 原文切换、逐页查看、复制全文、
   另存 `.md` / `.txt`（输出格式在设置页选择）
 - ⏹️ **识别可中断**：流式解码 + 实时「已生成 N 字」，取消在 1～2 秒内生效
+- 🧩 **推理引擎按需下载**：安装包不含 PyTorch（~300MB 级）；模型页按显卡二选一
+  下载运行时组件——CPU（约 260MB）/ CUDA 12.8 · NVIDIA 专用（约 3.3GB，自带
+  CUDA 运行时，无需装 Toolkit，需 570+ 驱动）。断点续传、装完即用；进入模型页
+  时自动检测硬件并推荐（组件由 `build_components.py` 从官方 wheel 打包，
+  发布于仓库 GitHub Release）
 - 🕘 **最近识别**：`outputs/` 产出列表，点击回填查看；删除进回收站
 - 🎨 **深浅色主题 + 界面缩放**
-- 🌍 **多语言界面**：中文（默认）/ English / Español，设置页下拉切换、即时生效；
+- 🌍 **多语言界面**：中文（默认）/ English，设置页下拉切换、即时生效；
   文案集中于 `webview/locales/*.json`（前端与后端共用）——**新增语言只需丢一份
   `<code>.json`**（含 `meta.nativeName` 母语名），下拉框自动出现新选项，无需改代码
 - 📜 **运行日志**：下载／加载／识别事件自动记录到 `logs/`
@@ -80,7 +85,7 @@
 | **输出格式** | 识别结果自动保存与「保存」按钮导出的文件格式：Markdown（`.md`）/ 纯文本（`.txt`） |
 | **外观主题** | 浅色／深色／跟随系统 |
 | **界面缩放** | 调整文字与控件大小 |
-| **界面语言** | 下拉选择（中文默认 / English / Español…）；选项自动发现自 `webview/locales/`，持久化到 `settings.json` 的 `lang` |
+| **界面语言** | 下拉选择（中文默认 / English…）；选项自动发现自 `webview/locales/`，持久化到 `settings.json` 的 `lang` |
 
 ---
 
@@ -112,7 +117,7 @@ proc_guard.py           # Windows Job Object（进程退出连带清理）
 motw_unblock.py         # 启动自清 Mark-of-the-Web（onedir 发行版必需）
 version.py              # 版本单一事实来源
 webview/                # 前端（HTML / CSS / JS）
-webview/locales/        # 语言包 en / zh / es（前后端共用，加语言=加一份 JSON）
+webview/locales/        # 语言包 en / zh（前后端共用，加语言=加一份 JSON）
 assets/make_icon.py     # 图标生成（Pillow 绘制 → PNG/ICO）
 OCRMiniTool.spec        # PyInstaller onedir 打包配置
 runtime_hook_utf8.py    # 冻结运行时 UTF-8 / 证书修复钩子

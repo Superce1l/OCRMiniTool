@@ -25,7 +25,7 @@ import threading
 import time
 from pathlib import Path
 
-from downloader import quick_check
+from downloader import RUNTIME_DIR, installed_torch_info, quick_check
 from i18n import tr
 from ocr_postprocess import PAGE_SPLIT_RE, to_gui_markdown
 
@@ -81,10 +81,57 @@ def _make_hooked_streamer(base_cls):
     return _HookedTextStreamer
 
 
-try:
-    import transformers as _transformers  # noqa: E402
-except Exception:                          # pragma: no cover
-    _transformers = None
+# ── 推理引擎组件（torch）的运行时接线 ────────────────────────────
+# 安装包本体不含 torch：使用者在「模型」页按硬件下载 cpu/cu128 组件到
+# runtime/（见 downloader._TORCH_FLAVORS）。这里把该目录插到 sys.path 最前，
+# 让 import torch 命中外部组件而非冻结 PYZ／venv；目录不存在时是空操作
+# （dev 环境走 venv 的 torch）。进程中途装完组件也要生效：重扫 sys.path。
+def _ensure_runtime_path():
+    """runtime/ 组件目录存在 → 插到 sys.path 最前并刷新模块查找缓存。"""
+    from downloader import RUNTIME_DIR
+    if str(RUNTIME_DIR) in sys.path or not (RUNTIME_DIR / "torch").is_dir():
+        return
+    sys.path.insert(0, str(RUNTIME_DIR))
+    if sys.platform == "win32":
+        lib = RUNTIME_DIR / "torch" / "lib"
+        if lib.is_dir():
+            os.add_dll_directory(str(lib))   # torch/lib 的 CUDA DLL 解析目录
+    import importlib
+    importlib.invalidate_caches()
+    # transformers 在其模块导入时就固化 is_torch_available（4.52 于
+    # import_utils 顶层求值一次）。若那次求值发生在组件安装前（启动早期的
+    # 状态轮询就会 import transformers），这里 torch 刚可见，必须把缓存
+    # 纠正回来，否则 AutoModel 会报「requires the PyTorch library」。
+    try:
+        from transformers.utils import import_utils as _iu
+        if not getattr(_iu, "_torch_available", False):
+            import importlib.util as _ilu
+            if _ilu.find_spec("torch") is not None:
+                import torch as _torch_mod
+                _iu._torch_available = True
+                _iu._torch_version = _torch_mod.__version__
+    except Exception:
+        pass
+
+
+_ensure_runtime_path()   # transformers 的 is_torch_available 首次求值会缓存
+                         # 结果——必须让 torch spec 在其之前可见
+
+_transformers = None
+
+
+def _ensure_transformers():
+    """懒加载 transformers（torch 组件可能进程中途才装好，不能在模块导入期
+    就固化「torch 不可用」的判断）。返回 None＝transformers 本体缺失。"""
+    global _transformers
+    if _transformers is None:
+        _ensure_runtime_path()
+        try:
+            import transformers
+            _transformers = transformers
+        except Exception:                  # pragma: no cover
+            _transformers = None
+    return _transformers
 
 
 class EngineError(RuntimeError):
@@ -114,11 +161,16 @@ def _patch_tensor_cuda(enable: bool):
 
 
 def _torch():
+    _ensure_runtime_path()
     try:
         import torch
         return torch
     except Exception as e:   # pragma: no cover
-        raise EngineError(tr("err.noTorch")) from e
+        # 原始异常必须留痕：组件装好却仍导入失败时（如缺 sympy 等 torch 的
+        # 纯 Python 依赖），只看 EngineError 文案无从定位。
+        from applog import log_error
+        log_error("import torch 失败（runtime 组件）", exc=e)
+        raise EngineError(tr("err.noTorchComponent")) from e
 
 
 class OcrEngine:
@@ -153,17 +205,49 @@ class OcrEngine:
         self._error = str(msg)
 
     def device_info(self) -> dict:
-        """torch/CUDA 检测（不依赖模型已加载）。"""
+        """torch/CUDA 检测（不依赖模型已加载）。
+
+        cudaBuild 是 torch.version.cuda（CPU 版 torch 为 None/""）——issue #3
+        的教训：安装包打进 CPU 版 torch 时 cuda 恒为 False，必须和「有 CUDA
+        版 torch 但没驱动/没卡」区分开，提示语才指得到正解。
+
+        torch 不可导入（组件未装）时，torch 和 transformers **都不碰**：
+          • 反复 import torch 部分初始化在冻结环境会 native abort（无痕杀
+            进程，实录 ucrtbase 0xc0000409）；失败后 60s 内不重试。
+          • import transformers 更致命——4.52 在导入期按「torch 是否可见」
+            固化 is_torch_available 并注册懒加载类，先导入会让之后装好组件
+            也救不回（AutoModel 永远 requires the PyTorch library）。
+        torch 可见性用 find_spec 探测（零导入成本）：dev 命中 venv 的 torch、
+        冻结环境命中 runtime/ 组件，两侧语义一致。
+        """
         info = {"torch": None, "cuda": False, "cudaName": "", "vramGb": 0.0,
-                "transformers": None}
+                "cudaBuild": "", "transformers": None}
+        _ensure_runtime_path()
+        import importlib.util as _ilu
+        if 'torch' not in sys.modules:
+            spec = _ilu.find_spec("torch")
+            if spec is None:
+                return info
+            # 组件解压进行中 find_spec 也会命中（torch/__init__.py 早期落
+            # 地），此时导入只会半途失败并毒化 transformers 的可用性缓存
+            # （它以这次导入为准）。runtime 来源必须等安装标记落地。
+            origin = spec.origin or ""
+            if origin.startswith(str(RUNTIME_DIR)) \
+                    and installed_torch_info() is None:
+                return info
+        frozen = bool(getattr(sys, "frozen", False))
+        if frozen and 'torch' not in sys.modules \
+                and time.time() - device_info._torch_fail_at < 60:
+            return info
         try:
             import transformers
             info["transformers"] = transformers.__version__
         except Exception:
             pass
         try:
-            import torch
+            torch = _torch()
             info["torch"] = torch.__version__
+            info["cudaBuild"] = torch.version.cuda or ""
             info["cuda"] = bool(torch.cuda.is_available())
             if info["cuda"]:
                 try:
@@ -172,9 +256,18 @@ class OcrEngine:
                     info["vramGb"] = round(props.total_memory / 1e9, 1)
                 except Exception:
                     pass
-        except Exception:
-            pass
+        except EngineError:
+            if frozen:
+                device_info._torch_fail_at = time.time()
         return info
+
+    _torch_fail_at = 0.0   # 冻结环境 import torch 最近失败时刻（负缓存）
+
+    @staticmethod
+    def _runtime_flavor_hint() -> str:
+        """device_info 用的组件 flavor 线索（纯文件级，不跑硬件检测）。"""
+        from downloader import installed_torch_info
+        return (installed_torch_info() or {}).get("flavor") or "cpu"
 
     # ── 加载 ─────────────────────────────────────────────────
     def load(self, device_pref: str = "auto", cb=None):
@@ -191,22 +284,31 @@ class OcrEngine:
                 cb(msg)
 
         self._error = None
-        if _transformers is None:
-            raise EngineError(tr("err.noTransformers"))
-        _s(tr("eng.loadingTokenizer"))
-        AutoTokenizer = _transformers.AutoTokenizer
-        AutoModel = _transformers.AutoModel
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            str(self.model_dir), trust_remote_code=True)
-
+        # 设备解析放最前（issue #3）：选了 CUDA 但用不了时，在加载任何权重
+        # 之前就快速失败，并区分两种病因——
+        #   • torch.version.cuda 为空：安装包打进去的是 CPU 版 torch，GPU 永远
+        #     不可见（v1.1.2 发行包即此病），换驱动无用，得换包；
+        #   • 否则是有 CUDA 版 torch 但没驱动/没卡，走原 noCudaDevice 提示。
         cuda_ok = bool(torch.cuda.is_available())
         if device_pref == "cpu":
             device = "cpu"
         elif device_pref == "cuda" and not cuda_ok:
+            if not getattr(torch.version, "cuda", None):
+                raise EngineError(
+                    tr("err.torchCpuBuild", ver=torch.__version__))
             raise EngineError(tr("err.noCudaDevice"))
         else:
             device = "cuda" if cuda_ok else "cpu"
         _patch_tensor_cuda(device == "cpu")
+
+        transformers_mod = _ensure_transformers()
+        if transformers_mod is None:
+            raise EngineError(tr("err.noTransformers"))
+        _s(tr("eng.loadingTokenizer"))
+        AutoTokenizer = transformers_mod.AutoTokenizer
+        AutoModel = transformers_mod.AutoModel
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            str(self.model_dir), trust_remote_code=True)
 
         _s(tr("eng.loadingWeights", device=device))
         t0 = time.time()
@@ -220,7 +322,7 @@ class OcrEngine:
         # 走 transformers 动态模块加载器，包属性补丁对它无效（实测绑定仍是原
         # 类）。但 `_uocr_generate` 是**调用时**才查模块全局名——加载完成后直接
         # 改写该模块字典，确定生效。
-        hooked = _make_hooked_streamer(_transformers.TextStreamer)
+        hooked = _make_hooked_streamer(transformers_mod.TextStreamer)
         for name, mod in list(sys.modules.items()):
             if name.endswith("modeling_unlimitedocr") and hasattr(mod, "TextStreamer"):
                 mod.TextStreamer = hooked

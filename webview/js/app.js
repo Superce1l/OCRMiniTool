@@ -24,6 +24,8 @@ const state = {
   curPage: 0,
   resultMode: "rendered",
   status: null,
+  env: null,            // /api/env 推理引擎组件状态（硬件检测 + 菜单 + 安装态）
+  envFlavor: null,      // 卡片上当前点选的组件 key（null＝跟随 selected）
   settings: { outFormat: "md" },
   knownExts: new Set(["jpg", "jpeg", "png", "bmp", "webp", "tif", "tiff", "pdf"]),
 };
@@ -68,6 +70,7 @@ function switchView(v) {
   $$(".nav-item").forEach(b => b.classList.toggle("active", b.dataset.view === v));
   $$(".view").forEach(s => s.classList.toggle("active", s.dataset.view === v));
   $("#view-title").textContent = viewTitle(v);
+  if (v === "model") loadEnv();   // 硬件检测有成本，仅在进入模型页时拉取
 }
 $("#nav").addEventListener("click", e => {
   const b = e.target.closest(".nav-item");
@@ -546,7 +549,8 @@ function renderModelPage() {
       title: t("env.device"),
       items: [
         { label: "CPU", ok: true, detail: t("env.available") },
-        { label: "CUDA GPU", ok: st.cuda, detail: st.cuda ? `${st.cudaName} · ${st.vramGb} GB` : t("env.noCuda") },
+        { label: "CUDA GPU", ok: st.cuda, detail: st.cuda ? `${st.cudaName} · ${st.vramGb} GB`
+          : (st.cudaBuild ? t("env.noCuda") : t("env.noCudaCpuBuild")) },
         { label: t("env.interpreter"), ok: true, detail: shortPath(st.interpreter || "—") },
       ],
     },
@@ -627,6 +631,96 @@ function setModelProgress(pct, status) {
   $("#model-prog-pct").textContent = p + "%";
   if (status != null) $("#model-prog-status").textContent = status;
 }
+
+/* ── 推理引擎组件卡片（torch 运行时，按硬件选装）───────────── */
+async function loadEnv() {
+  try { state.env = await API.getEnv(); } catch { state.env = null; }
+  renderFlavorCard();
+}
+
+function renderFlavorCard() {
+  const env = state.env, list = $("#flavor-list");
+  if (!env || !env.ok) {
+    list.innerHTML = `<div class="d" style="opacity:.6;padding:6px 0">${escapeHtml(env?.error || t("env.checking"))}</div>`;
+    $("#flavor-chip").textContent = t("env.checking");
+    $("#btn-flavor-download").disabled = true;
+    return;
+  }
+  const pick = state.envFlavor || env.selected || env.recommended;
+  const installedFlavor = env.installed?.flavor;
+
+  list.innerHTML = env.options.map(o => {
+    const active = o.key === pick;
+    const badges = [
+      o.recommended ? `<span class="chip chip-accent">${escapeHtml(t("env.recommended"))}</span>` : "",
+      o.installed ? `<span class="chip chip-ok">${escapeHtml(t("env.installed"))}</span>` : "",
+      !o.suitable ? `<span class="chip chip-muted">${escapeHtml(t("env.unsuitable"))}</span>` : "",
+    ].join("");
+    return `
+    <label class="mc-meta" style="display:flex;align-items:flex-start;gap:10px;padding:10px;border:1px solid var(--line);border-radius:10px;margin-top:8px;cursor:pointer;${active ? "border-color:var(--accent);background:var(--accent-soft,rgba(0,0,0,.03))" : ""}" data-flavor="${o.key}">
+      <input type="radio" name="flavor" value="${o.key}" ${active ? "checked" : ""} ${env.envDownloading ? "disabled" : ""} style="margin-top:3px">
+      <span style="flex:1">
+        <span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <b>${escapeHtml(o.label)}</b>
+          <span style="opacity:.6">${o.size_mb >= 1024 ? (o.size_mb / 1024).toFixed(1) + " GB" : o.size_mb + " MB"}</span>
+          ${badges}
+        </span>
+        <span style="display:block;opacity:.75;margin-top:2px">${escapeHtml(o.desc)}</span>
+        ${o.note ? `<span style="display:block;color:#b45309;margin-top:2px">${escapeHtml(o.note)}</span>` : ""}
+      </span>
+    </label>`;
+  }).join("");
+
+  // 点选即记住（持久化在后端 set_env_flavor；这里不阻塞渲染）
+  list.querySelectorAll("input[name=flavor]").forEach(r => r.addEventListener("change", async () => {
+    state.envFlavor = r.value;
+    renderFlavorCard();
+    try { await API.setEnvFlavor(r.value); } catch {}
+  }));
+
+  // 状态 chip 与按钮
+  const chip = $("#flavor-chip");
+  const inst = env.installed;
+  if (env.envDownloading) {
+    chip.className = "chip chip-warn";
+    chip.textContent = t("task.envDl");
+  } else if (inst) {
+    chip.className = "chip chip-ok";
+    chip.textContent = t("env.installedChip", { flavor: inst.flavor, ver: inst.torch || "" });
+  } else {
+    chip.className = "chip chip-warn";
+    chip.textContent = t("env.notInstalled");
+  }
+  $("#btn-flavor-download").disabled = !!env.envDownloading || !pick || !env.options.find(o => o.key === pick)?.suitable;
+  $("#btn-flavor-cancel").hidden = !env.envDownloading;
+  $("#flavor-progress").hidden = !env.envDownloading;
+}
+
+$("#btn-flavor-download").addEventListener("click", async () => {
+  const env = state.env;
+  const pick = state.envFlavor || env?.selected || env?.recommended;
+  if (!pick) { flash(t("env.pickFirst")); return; }
+  $("#flavor-progress").hidden = false;
+  setFlavorProgress(0, t("model.prepDownload"));
+  const r = await API.startEnvDownload(pick);
+  if (!r.ok) { flash(r.error || t("msg.cannotLoad")); $("#flavor-progress").hidden = true; }
+  if (r.already) { $("#flavor-progress").hidden = true; loadEnv(); }
+});
+$("#btn-flavor-cancel").addEventListener("click", () => API.cancelEnvDownload());
+
+function setFlavorProgress(pct, status) {
+  const p = Math.max(0, Math.min(100, Math.round((pct || 0) * 100)));
+  $("#flavor-bar").style.width = p + "%";
+  if (status != null) $("#flavor-status").textContent = p + "% · " + status;
+}
+API.on("env-progress", ({ pct, status }) => {
+  $("#flavor-progress").hidden = false;
+  setFlavorProgress(pct, status);
+  if (pct >= 1 || pct === 0) {   // 完成／失败/取消 → 刷新安装态
+    setTimeout(loadEnv, 800);
+    API.getStatus().then(s => { state.status = s; renderModelPage(); }).catch(() => {});
+  }
+});
 
 /* ── 设置页 ───────────────────────────────────────────── */
 // 语言下拉选项：优先用后端发现的 languages（扫 locales 目录），

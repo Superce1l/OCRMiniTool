@@ -283,6 +283,8 @@ class WebViewServer:
                                        "modelReady": bool(server.backend.engine.ready)})
                 if path == "/api/status":
                     return self._json(server.backend.get_status())
+                if path == "/api/env":
+                    return self._json(server.backend.env_status())
                 if path == "/api/settings":
                     return self._json(server.backend.get_settings())
                 if path == "/api/history":
@@ -303,6 +305,16 @@ class WebViewServer:
                         return self._json(server.backend.set_settings(self._read_json_body()))
                     if path == "/api/download":
                         return self._json(server.backend.start_download())
+                    if path == "/api/env/download":
+                        body = self._read_json_body()
+                        return self._json(server.backend.start_env_download(
+                            body.get("flavor", "")))
+                    if path == "/api/env/set":
+                        body = self._read_json_body()
+                        return self._json(server.backend.set_env_flavor(
+                            body.get("flavor", "")))
+                    if path == "/api/env/cancel":
+                        return self._json({"ok": server.backend.cancel_env_download()})
                     if path == "/api/load":
                         return self._json(server.backend.start_load())
                     if path == "/api/recognize":

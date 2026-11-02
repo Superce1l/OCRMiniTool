@@ -12,3 +12,8 @@ __pycache__/
 *.pyc
 build/
 dist/
+
+# 组件化构建产物（组件 zip 与瘦身包的输出目录）
+build_*/
+dist_*/
+runtime/

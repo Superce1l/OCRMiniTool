@@ -138,6 +138,26 @@
         <div class="sec-title" data-i18n="model.envTitle">Runtime environment</div>
         <div id="env-panel" class="health-panel"></div>
 
+        <div class="sec-title" data-i18n="model.engineTitle">Inference engine (PyTorch runtime)</div>
+        <div class="model-card">
+          <div class="mc-head">
+            <div class="mc-info">
+              <div class="d" data-i18n="model.engineDesc">The app ships without PyTorch — pick the runtime matching your hardware and download it once. NVIDIA GPU users should choose CUDA.</div>
+            </div>
+          </div>
+          <div id="flavor-list"></div>
+          <div class="model-state-row" style="margin-top:10px">
+            <span class="chip" id="flavor-chip" data-i18n="env.checking">Checking…</span>
+            <div class="sp"></div>
+            <button class="btn btn-ghost btn-sm" id="btn-flavor-cancel" hidden data-i18n="btn.cancel">Cancel</button>
+            <button class="btn btn-primary btn-sm" id="btn-flavor-download" disabled data-i18n="env.download">Download component</button>
+          </div>
+          <div class="progress" id="flavor-progress" hidden style="margin-top:10px">
+            <div class="bar" id="flavor-bar"></div>
+            <div class="status" id="flavor-status"></div>
+          </div>
+        </div>
+
         <div class="sec-title" data-i18n="model.section">OCR model</div>
         <div class="model-card">
           <div class="mc-head">

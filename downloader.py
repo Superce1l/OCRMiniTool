@@ -12,6 +12,8 @@
 """
 from __future__ import annotations
 
+import json
+import os
 import ssl
 import sys
 import time
@@ -223,6 +225,296 @@ def _download_file(url: str, dest: Path, progress_cb=None, cancel_check=None):
 
 class CancelledError(RuntimeError):
     """用户取消下载。"""
+
+
+# ── 推理引擎组件（PyTorch 运行时）：CPU / CUDA 按需下载 ─────────────
+# 安装包本体**不含 torch**（v1.1.2 曾把构建机的 CPU 版 torch 照单打进包，
+# 用户有 N 卡也永远检测不到——issue #3；反过来想，干脆谁都 不带，安装包从
+# 4.4G 缩到 ~0.3G）。使用者在「模型」页按自己硬件二选一下载，解压到
+# RUNTIME_DIR（torch/、torchvision/ 顶层目录），ocr_engine 启动时把该目录
+# 插到 sys.path 最前，import torch 即命中外部组件。
+#
+# 组件 zip 由 build_components.py 从官方 wheel（pip install --target）打包
+# 并输出 sha256，发布到本仓库 GitHub Release（tag：runtime-torch<版本>）。
+# GitHub 直连不走 HF 镜像（set_mirror 只改写 huggingface.co URL）。
+# 版本必须与 transformers==4.52.1 兼容：torch 2.11 起移除了
+# torch.nn.functional._model_output_flatten 等内部符号，transformers
+# 4.52.1 的 generation.utils 仍在引用 → GenerationMixin/AutoTokenizer 全体
+# 占位化（NameError 实录）。2.8.0+cu128 是 AutoDL 真机验证过的组合。
+_TORCH_VERSION = "2.8.0"
+_TORCHVISION_VERSION = "0.23.0"
+_TORCH_TAG = f"runtime-torch{_TORCH_VERSION}"
+# OCRMIT_RUNTIME_BASE：组件下载基址覆盖（测试/内网镜像用），形如
+# http://host/prefix；缺省 = 本仓库 GitHub Release（runtime-torch<版本> tag）
+_TORCH_REL_BASE = (os.environ.get("OCRMIT_RUNTIME_BASE").rstrip("/")
+                   if os.environ.get("OCRMIT_RUNTIME_BASE")
+                   else ("https://github.com/Superce1l/OCRMiniTool/releases/"
+                         f"download/{_TORCH_TAG}"))
+
+# cu128 wheel 要求的最低 NVIDIA 驱动（CUDA 12.8 → 570 系列；取整 570.0）
+_CU128_MIN_DRIVER = 570.0
+
+
+def _runtime_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).parent
+
+
+RUNTIME_DIR = _runtime_base_dir() / "runtime"
+_TORCH_MARKER = "torch_build.json"
+
+# flavor → 组件元数据。label/desc 走 i18n key（界面语言跟随设置，英文用户
+# 看英文文案——与 STT 的纯中文注册表不同，OCR 的用户一半在墙外）。
+_TORCH_FLAVORS: dict[str, dict] = {
+    "cpu": {
+        "zip": f"ocrmini-runtime-torch{_TORCH_VERSION}-cpu.zip",
+        "size_mb": 259,
+        "label_key": "env.flavor.cpu",
+        "desc_key": "env.flavor.cpuDesc",
+    },
+    "cu128": {
+        "zip": f"ocrmini-runtime-torch{_TORCH_VERSION}-cu128.zip",
+        "size_mb": 3300,
+        "label_key": "env.flavor.cu128",
+        "desc_key": "env.flavor.cu128Desc",
+    },
+}
+
+
+def torch_flavors() -> dict[str, dict]:
+    """flavor 注册表唯读副本（供 UI 列菜单）。"""
+    return {k: dict(v) for k, v in _TORCH_FLAVORS.items()}
+
+
+def installed_torch_info(runtime_dir: Path | None = None) -> dict | None:
+    """读安装标记 torch_build.json；None＝尚未安装任何推理引擎组件。"""
+    d = runtime_dir or RUNTIME_DIR
+    try:
+        data = json.loads((d / _TORCH_MARKER).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) and data.get("flavor") else None
+    except Exception:
+        return None
+
+
+def quick_check_torch(flavor: str, runtime_dir: Path | None = None) -> bool:
+    """推理引擎组件是否就绪：标记在 + torch 可见 + 关键 DLL 在位。
+
+    cu128 额外要求 torch_cuda.dll（CPU zip 覆盖安装后残留标记不一致的兜底）。
+    """
+    d = runtime_dir or RUNTIME_DIR
+    info = installed_torch_info(d)
+    if not info or info.get("flavor") != flavor:
+        return False
+    if info.get("torch") != _TORCH_VERSION:
+        return False
+    if not (d / "torch" / "__init__.py").is_file():
+        return False
+    if flavor == "cu128" and not (d / "torch" / "lib" / "torch_cuda.dll").is_file():
+        return False
+    return True
+
+
+def detect_hardware() -> dict:
+    """检测显卡与 NVIDIA 驱动版本（Windows：WMI + nvidia-smi，零依赖）。
+
+    从 STTMiniTool 同名函数移植。必须在组件下载前就能跑（先有鸡先有蛋：
+    torch 还没装，不能用 torch.cuda 探测）。
+    """
+    info = {"gpus": [], "vendors": [], "nvidia_driver": None,
+            "has_discrete": False, "error": None}
+    if sys.platform != "win32":
+        # 非 Windows（开发/远程调试）也给出最小判定，不弹错误
+        info["vendors"] = []
+        return info
+
+    import json as _json
+    import subprocess
+
+    def _run_hidden(cmd: list[str], timeout: int = 12) -> str:
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        try:
+            r = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL,
+                               text=True, encoding="utf-8", errors="replace",
+                               timeout=timeout, creationflags=0x08000000,
+                               startupinfo=si)
+            return r.stdout or ""
+        except Exception:
+            return ""
+
+    ps = ("Get-CimInstance Win32_VideoController | "
+          "Select-Object Name,AdapterCompatibility,DriverVersion | "
+          "ConvertTo-Json -Compress")
+    out = _run_hidden(["powershell", "-NoProfile", "-NonInteractive",
+                       "-Command", ps])
+    try:
+        data = _json.loads(out) if out.strip() else []
+        if isinstance(data, dict):
+            data = [data]
+        for d in data:
+            name = (d.get("Name") or "").strip()
+            compat = (d.get("AdapterCompatibility") or "").strip()
+            s = f"{compat} {name}".lower()
+            if "nvidia" in s:
+                vendor = "nvidia"
+            elif "amd" in s or "advanced micro" in s or "ati " in s:
+                vendor = "amd"
+            elif "intel" in s:
+                vendor = "intel"
+            else:
+                vendor = "other" if name else ""
+            if name and vendor:
+                info["gpus"].append({"vendor": vendor, "name": name,
+                                     "driver": (d.get("DriverVersion") or "").strip()})
+    except Exception as e:
+        info["error"] = f"显卡列举失败：{e}"
+
+    info["vendors"] = sorted({g["vendor"] for g in info["gpus"]})
+    info["has_discrete"] = "nvidia" in info["vendors"]
+
+    if "nvidia" in info["vendors"]:
+        smi = _run_hidden(["nvidia-smi", "--query-gpu=driver_version",
+                           "--format=csv,noheader"])
+        for line in smi.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parts = line.split(".")
+                info["nvidia_driver"] = float(
+                    f"{parts[0]}.{parts[1]}" if len(parts) > 1 else parts[0])
+            except Exception:
+                pass
+            break
+    return info
+
+
+def recommend_torch_flavor(hw: dict | None = None) -> dict:
+    """依硬件推荐推理引擎组件，返回 UI 可直接渲染的整份清单。
+
+    返回 {"recommended", "reason", "hardware", "options":
+          [{"key","label","size_mb","desc","recommended","suitable","note"}…]}
+    推荐政策：有 NVIDIA → cu128（驱动低于 CUDA 12.8 要求仍推荐但注明需升级
+    驱动）；其余（AMD/Intel/无独显）→ cpu。
+    """
+    hw = hw or detect_hardware()
+    has_nv = "nvidia" in hw.get("vendors", [])
+    drv = hw.get("nvidia_driver")
+    if has_nv:
+        recommended = "cu128"
+        reason = tr("env.recommendNv", gpu=(hw["gpus"][0]["name"] if hw["gpus"] else "NVIDIA"))
+    else:
+        recommended = "cpu"
+        reason = tr("env.recommendCpu")
+
+    options = []
+    for key, meta in _TORCH_FLAVORS.items():
+        note = ""
+        suitable = True
+        if key == "cu128":
+            if not has_nv:
+                suitable = False
+                note = tr("env.noteNoNv")
+            elif drv is not None and drv < _CU128_MIN_DRIVER:
+                note = tr("env.noteOldDriver", driver=f"{drv:g}", min="570")
+        options.append({
+            "key": key,
+            "label": tr(meta["label_key"], ver=_TORCH_VERSION),
+            "size_mb": meta["size_mb"],
+            "desc": tr(meta["desc_key"]),
+            "recommended": key == recommended,
+            "suitable": suitable,
+            "note": note,
+        })
+    return {"recommended": recommended, "reason": reason,
+            "hardware": hw, "options": options}
+
+
+def _extract_zip_checked(zip_path: Path, dest: Path,
+                         progress_cb=None, cancel_check=None):
+    """把组件 zip 解压到 dest（带 zip-slip 防护与取消检查）。
+
+    组件 zip 由 build_components.py 打包，顶层只含 torch/、torchvision/ 等
+    wheel 顶级目录；这里仍按不可信归档对待：拒绝绝对路径与 .. 上跳成员。
+    progress_cb(done_files, total_files)。
+    """
+    import zipfile
+    with zipfile.ZipFile(zip_path) as zf:
+        names = [n for n in zf.namelist() if not n.endswith("/")]
+        total = len(names)
+        for i, name in enumerate(names):
+            if cancel_check is not None and cancel_check():
+                raise CancelledError(name)
+            target = (dest / name).resolve()
+            if dest.resolve() not in target.parents and target != dest.resolve():
+                raise RuntimeError(f"组件 zip 含非法路径成员：{name}")
+            zf.extract(name, dest)
+            if progress_cb and i % 25 == 0:
+                progress_cb(i, total)
+        if progress_cb:
+            progress_cb(total, total)
+
+
+def download_torch(flavor: str, progress_cb=None, cancel_check=None,
+                   force: bool = False) -> dict:
+    """下载并安装推理引擎组件（断点续传下载 → 校验 → 解压 → 安装标记）。
+
+    progress_cb(pct: float, msg: str)（0~1，下载段占 0~0.9、解压段 0.9~1）。
+    已装同版本同 flavor 时直接返回标记（force=True 强制重装）。
+    安装中途取消：zip 留 .part 可续传；已解压文件被下次安装覆盖，无半成品
+    标记（标记最后才写）→ 不会出现「标记说有、文件缺失」的坏状态。
+    """
+    meta = _TORCH_FLAVORS.get(flavor)
+    if not meta:
+        raise RuntimeError(f"未知的推理引擎组件：{flavor}")
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    if not force:
+        cur = installed_torch_info()
+        if cur and cur.get("flavor") == flavor and cur.get("torch") == _TORCH_VERSION \
+                and quick_check_torch(flavor):
+            return cur
+
+    url = f"{_TORCH_REL_BASE}/{meta['zip']}"
+    zip_path = RUNTIME_DIR / (meta["zip"] + ".part")
+    final_zip = RUNTIME_DIR / meta["zip"]
+    if final_zip.exists() and not zip_path.exists():
+        zip_path = final_zip        # 上次已完整下载但未装完：直接复用
+    was_part = zip_path.suffix == ".part"
+    _download_file(url, zip_path,
+                   progress_cb=lambda done, total: progress_cb(
+                       0.9 * done / total, tr("env.dlProgress",
+                                              done=done // 1_048_576,
+                                              total=max(total // 1_048_576, 1)))
+                   if (progress_cb and total) else None,
+                   cancel_check=cancel_check)
+    if was_part:
+        zip_path.rename(final_zip)   # .part 残档 → 正式名（重命名文件本身）
+    zip_path = final_zip
+
+    if progress_cb:
+        progress_cb(0.9, tr("env.extractProgress"))
+    _extract_zip_checked(zip_path, RUNTIME_DIR,
+                         cancel_check=cancel_check,
+                         progress_cb=lambda d, t: progress_cb(
+                             0.9 + 0.1 * d / max(t, 1), tr("env.extractProgress"))
+                         if progress_cb else None)
+    try:
+        zip_path.unlink(missing_ok=True)     # 装完即删安装包（3GB 不留盘）
+    except OSError:
+        pass
+
+    marker = {"torch": _TORCH_VERSION, "torchvision": _TORCHVISION_VERSION,
+              "flavor": flavor, "installed_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    (RUNTIME_DIR / _TORCH_MARKER).write_text(
+        json.dumps(marker, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 组件是进程中途装的 → 让 importlib 重新扫描 sys.path（否则 find_spec
+    # 看不到新目录，transformers 的 is_torch_available 也拿旧结果）
+    import importlib
+    importlib.invalidate_caches()
+    from applog import log_download
+    log_download(f"推理引擎组件安装完成：{flavor}（torch {_TORCH_VERSION}）")
+    return marker
 
 
 # 权重体量参考（用于「预计下载量」提示；实际进度按真实 Content-Length 加权）

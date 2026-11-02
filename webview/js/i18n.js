@@ -20,7 +20,6 @@ window.I18N = (() => {
   const LANGUAGES = [
     { code: "zh", name: "中文" },
     { code: "en", name: "English" },
-    { code: "es", name: "Español" },
   ];
   let dict = {};
   let lang = FALLBACK;

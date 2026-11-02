@@ -24,7 +24,8 @@ import time
 from pathlib import Path
 
 from applog import log_download, log_error, log_info, log_model, log_ocr
-from downloader import CancelledError, download_model, quick_check, set_mirror
+from downloader import (CancelledError, download_model, installed_torch_info,
+                        quick_check, quick_check_torch, set_mirror)
 from i18n import available_languages, set_lang, tr
 from ocr_engine import EngineError, OcrEngine
 from settings_store import SettingsStore
@@ -45,10 +46,11 @@ DEFAULT_SETTINGS = {
     "modelDir": "",        # 空 = 程序目录下 models/Unlimited-OCR-2
     "mirror": "",          # HuggingFace 镜像，如 hf-mirror.com
     "devicePref": "auto",  # auto | cuda | cpu
+    "torchFlavor": "",     # 推理引擎组件：""=auto(按硬件推荐) | cpu | cu128
     "outFormat": "md",     # 识别结果保存格式：md | txt
     "theme": "light",
     "scale": 100,
-    "lang": "zh",          # 界面语言，默认中文（en | zh | es；i18n.py / i18n.js）
+    "lang": "zh",          # 界面语言，默认中文（en | zh；i18n.py / i18n.js）
     "pythonPath": "",      # 自定义 Python 解释器（源码运行时）；空 = 启动器选择的 venv
 }
 
@@ -115,8 +117,10 @@ class WebBackend:
         self.downloading = False
         self.loading = False
         self.recognizing = False
+        self.env_downloading = False            # 推理引擎组件下载中
         self._task_label = ""
         self.cancel_event = threading.Event()
+        self.env_cancel = threading.Event()
         # 界面语言（后端 SSE 进度/错误文案与原生对话框同语言）
         set_lang(self._settings_raw().get("lang"))
         # 下载/加载期间用户改了设置 → 需要重读 mirror/model dir
@@ -155,6 +159,7 @@ class WebBackend:
         return {"modelDir": cur.get("modelDir", ""),
                 "mirror": cur.get("mirror", ""),
                 "devicePref": cur.get("devicePref", "auto"),
+                "torchFlavor": cur.get("torchFlavor", ""),
                 "outFormat": cur.get("outFormat", "md"),
                 "theme": cur.get("theme", "light"),
                 "scale": cur.get("scale", 100),
@@ -223,9 +228,13 @@ class WebBackend:
             "loadedDevice": self._loaded_device,
             "devicePref": cur.get("devicePref", "auto"),
             "mirror": cur.get("mirror", ""),
+            "torchFlavor": cur.get("torchFlavor", ""),
+            "envInstalled": installed_torch_info(),
+            "envDownloading": self.env_downloading,
             "torch": dev.get("torch"),
             "transformers": dev.get("transformers"),
             "cuda": dev.get("cuda", False),
+            "cudaBuild": dev.get("cudaBuild", ""),
             "cudaName": dev.get("cudaName", ""),
             "vramGb": dev.get("vramGb", 0.0),
             "interpreter": sys.executable,
@@ -236,7 +245,8 @@ class WebBackend:
 
     def has_running_tasks(self) -> bool:
         with self._lock:
-            return self.downloading or self.loading or self.recognizing
+            return (self.downloading or self.loading or self.recognizing
+                    or self.env_downloading)
 
     def running_task_label(self) -> str:
         with self._lock:
@@ -245,7 +255,8 @@ class WebBackend:
     # ── 模型下载 ─────────────────────────────────────────────
     def start_download(self) -> dict:
         with self._lock:
-            if self.downloading or self.loading or self.recognizing:
+            if self.downloading or self.loading or self.recognizing \
+                    or self.env_downloading:
                 return {"ok": False, "error": tr("err.busy")}
             self.downloading = True
             self._task_label = tr("task.download")
@@ -289,8 +300,12 @@ class WebBackend:
         with self._lock:
             if self.loading or self.downloading or self.recognizing:
                 return {"ok": False, "error": tr("err.busy")}
+            if self.env_downloading:
+                return {"ok": False, "error": tr("err.envBusy")}
             if not quick_check(self._model_dir()):
                 return {"ok": False, "error": tr("err.modelMissing")}
+            if not quick_check_torch(self._torch_flavor()):
+                return {"ok": False, "error": tr("err.noTorchComponent")}
             self.loading = True
             self._task_label = tr("task.load")
         self.cancel_event.clear()
@@ -324,6 +339,119 @@ class WebBackend:
         threading.Thread(target=worker, name="model-load", daemon=True).start()
         return {"ok": True, "loading": True}
 
+    # ── 推理引擎组件（torch 运行时，按硬件选装）─────────────────
+    def _torch_flavor(self) -> str:
+        """生效的组件 flavor：设置值合法用之；其次已装者；否则按硬件推荐。
+
+        推荐结果随即写回设置（与 STTMiniTool._crisp_variant 同手法）：
+        推荐值由当次硬件检测得出，不固化在代码里。
+        """
+        from downloader import (installed_torch_info, recommend_torch_flavor,
+                                torch_flavors)
+        s = self._settings_raw().get("torchFlavor") or ""
+        if s in torch_flavors():
+            return s
+        info = installed_torch_info()
+        if info and info.get("flavor") in torch_flavors():
+            return info["flavor"]
+        rec = recommend_torch_flavor().get("recommended") or "cpu"
+        self.settings.update({"torchFlavor": rec})
+        return rec
+
+    def env_ready(self) -> bool:
+        """推理引擎组件是否就绪（app 启动时决定要不要自动加载模型）。"""
+        return quick_check_torch(self._torch_flavor())
+
+    def env_status(self) -> dict:
+        """硬件检测 + 组件菜单 + 安装状态（前端「推理引擎」卡片渲染）。"""
+        import shutil as _shutil
+        from downloader import installed_torch_info, recommend_torch_flavor
+        try:
+            rec = recommend_torch_flavor()
+        except Exception as e:
+            log_error("硬件检测失败", exc=e)
+            return {"ok": False, "error": str(e), "options": []}
+        installed = installed_torch_info()
+        options = rec["options"]
+        for o in options:
+            o["installed"] = bool(installed and installed.get("flavor") == o["key"])
+        try:
+            free_gb = round(_shutil.disk_usage(str(BASE_DIR)).free / 1e9, 1)
+        except Exception:
+            free_gb = None
+        return {"ok": True,
+                "selected": self._torch_flavor(),
+                "recommended": rec["recommended"],
+                "reason": rec["reason"],
+                "options": options,
+                "installed": installed,
+                "envDownloading": self.env_downloading,
+                "freeGb": free_gb}
+
+    def set_env_flavor(self, flavor: str) -> dict:
+        """记住使用者选的组件 flavor（下载是显式的另一动作）。"""
+        from downloader import _TORCH_VERSION, installed_torch_info, torch_flavors
+        if flavor not in torch_flavors():
+            return {"ok": False, "message": tr("env.unknownFlavor", flavor=flavor)}
+        self.settings.update({"torchFlavor": flavor})
+        installed = installed_torch_info()
+        fresh = bool(installed and installed.get("flavor") == flavor
+                     and installed.get("torch") == _TORCH_VERSION)
+        meta = torch_flavors()[flavor]
+        label = tr(meta["label_key"], ver=_TORCH_VERSION)
+        return {"ok": True, "flavor": flavor,
+                "message": tr("env.flavorSet" if fresh else "env.flavorSetNeedDl",
+                              label=label, size=meta["size_mb"])}
+
+    def start_env_download(self, flavor: str) -> dict:
+        """后台下载并安装推理引擎组件（进度走 SSE env-progress 事件）。"""
+        from downloader import _TORCH_VERSION, quick_check_torch, torch_flavors
+        if flavor not in torch_flavors():
+            return {"ok": False, "error": tr("env.unknownFlavor", flavor=flavor)}
+        with self._lock:
+            if self.env_downloading or self.downloading or self.loading \
+                    or self.recognizing:
+                return {"ok": False, "error": tr("err.busy")}
+            if quick_check_torch(flavor):
+                return {"ok": True, "already": True}
+            self.env_downloading = True
+            self._task_label = tr("task.envDl")
+        self.env_cancel.clear()
+
+        def worker():
+            def cb(pct, msg):
+                self._emit("env-progress", {"pct": pct, "status": msg})
+            try:
+                from downloader import download_torch
+                t0 = time.time()
+                marker = download_torch(flavor, progress_cb=cb,
+                                        cancel_check=self.env_cancel.is_set)
+                log_download(f"推理引擎组件就绪：{flavor} / torch {marker['torch']}"
+                             f"（{time.time() - t0:.0f}s）")
+                self._emit("env-progress",
+                           {"pct": 1.0, "status": tr("env.done", ver=marker["torch"])})
+            except CancelledError:
+                log_info("推理引擎组件下载已取消")
+                self._emit("env-progress",
+                           {"pct": 0, "status": tr("env.cancelled")})
+            except Exception as e:
+                log_error("推理引擎组件下载失败", exc=e)
+                self._emit("env-progress",
+                           {"pct": 0, "status": tr("dl.failed", err=e)})
+            finally:
+                with self._lock:
+                    self.env_downloading = False
+                    self._task_label = ""
+                self._publish_status()
+
+        threading.Thread(target=worker, name="env-download", daemon=True).start()
+        return {"ok": True, "downloading": True}
+
+    def cancel_env_download(self) -> bool:
+        if self.env_downloading:
+            self.env_cancel.set()
+        return True
+
     # ── OCR 识别 ─────────────────────────────────────────────
     def recognize(self, opts: dict, progress_cb=None) -> dict:
         """opts: {paths: [str], name: 原始主文件名, prompt: str, mode: "merged"|"batch"}
@@ -335,7 +463,8 @@ class WebBackend:
         （当前文件即时中断，其余跳过）。
         """
         with self._lock:
-            if self.recognizing or self.loading or self.downloading:
+            if self.recognizing or self.loading or self.downloading \
+                    or self.env_downloading:
                 raise EngineError(tr("err.busy"))
             if not self.engine.ready:
                 raise EngineError(tr("err.modelNotLoaded"))

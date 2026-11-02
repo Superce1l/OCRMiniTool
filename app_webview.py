@@ -385,12 +385,13 @@ def main():
     except Exception:
         pass
 
-    # 模型已下载 → 背景自动加载；未下载 → 停在模型页等使用者点下载
+    # 模型已下载且推理引擎组件就绪 → 背景自动加载；否则停在模型页，
+    # 由使用者先补齐缺的那块（组件未装时 load 也只会报「先下载组件」）
     try:
-        if srv.backend.model_files_present():
+        if srv.backend.model_files_present() and srv.backend.env_ready():
             srv.backend.start_load()
         else:
-            print(f"[{APP_NAME}] 模型尚未下载 → 等使用者于模型页下载。")
+            print(f"[{APP_NAME}] 模型或推理引擎组件未就绪 → 等使用者在模型页下载。")
     except Exception:
         pass
 

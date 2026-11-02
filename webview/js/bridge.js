@@ -120,6 +120,23 @@
       setTimeout(() => { emit("load-progress", { pct: 1, status: tr("load.done", null, "模型就绪") }); emit("status", { modelState: "ready" }); }, 1200);
       return { ok: true };
     },
+    async getEnv() {
+      // 推理引擎组件状态（含硬件检测，后端按需缓存外的实时数据）
+      if (MODE === "web") return apiGet("/api/env");
+      return { ok: true, selected: "cpu", recommended: "cpu", reason: "", options: [], installed: null, envDownloading: false };
+    },
+    async setEnvFlavor(flavor) {
+      if (MODE === "web") return apiPost("/api/env/set", { flavor });
+      return { ok: true, flavor, message: "mock" };
+    },
+    async startEnvDownload(flavor) {
+      if (MODE === "web") return apiPost("/api/env/download", { flavor });
+      return { ok: true };
+    },
+    async cancelEnvDownload() {
+      if (MODE === "web") { try { await apiPost("/api/env/cancel", {}); } catch {} return true; }
+      return true;
+    },
     async cancel() {
       if (MODE === "web") { try { await apiPost("/api/cancel", {}); } catch {} return true; }
       MOCK.cancelled = true; return true;
