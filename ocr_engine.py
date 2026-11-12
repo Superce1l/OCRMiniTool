@@ -324,7 +324,6 @@ def _log_infer(stats: dict, n_images: int):
 # ── 生成限幅 / 合并分组 / 切片策略（A2 / A3 / A6）─────────────────
 _MODEL_MAX_CONTEXT = 131072          # config.json 的 max_position_embeddings
 _PAGE_TOKENS_FLOOR, _PAGE_TOKENS_CEIL = 256, 65536
-_LONG_SHOT_RATIO = 3.0               # h/w 超过它算「长截图」，auto 走 base
 
 
 def _normalize_page_tokens(value) -> int:
@@ -380,14 +379,17 @@ def _auto_crop_mode(n_images: int, width: int = 0, height: int = 0) -> bool:
     """auto 切片策略（纯函数，可单测）：True=gundam 动态切片，False=base 整页。
 
     多页合并 → base（跨页上下文优先，且上游只为单图验证过切片）；
-    单图长截图（h/w > 3）→ base（切片网格会退化成一条窄柱，token 浪费且易截断）；
-    其余单图 → gundam（密集小字版面细节更好）。
+    单图 → gundam（与上游默认一致）。
+
+    **不再按长宽比把长截图降级成 base**（v1.3.2 修正）：真机实测 600×3600 的超长图
+    在 base 下被压到文字不可读，模型开始胡编（"不要将指导书用绳子或金属棒串…"），
+    甚至退化重复（8192 上限内跑了 36 分钟仍在输出）；同一张图 gundam 输出是连贯
+    正文。base 省下的 prefill（12.8s vs 40.3s）不值得用正确性换——base 保留为
+    用户显式选项，但 auto 不再替用户做这个取舍。
     """
     if n_images > 1:
         return False
-    if width <= 0 or height <= 0:
-        return True                     # 尺寸未知时保守用 gundam（旧默认）
-    return not (height / width > _LONG_SHOT_RATIO)
+    return True
 
 
 def _resolve_crop_mode(paths, pref):
@@ -411,16 +413,8 @@ def _resolve_crop_mode(paths, pref):
     else:                               # "auto" 及未知取值
         want = None
     if want is None:
-        if len(paths) > 1:
-            return False
-        w = h = 0
-        try:
-            from PIL import Image
-            with Image.open(paths[0]) as im:
-                w, h = im.size
-        except Exception:               # 读不到尺寸：按「非长截图」保守处理
-            w = h = 0
-        return _auto_crop_mode(1, w, h)
+        # auto 不再读图片尺寸（长截图规则的取舍已被真机证伪，见 _auto_crop_mode）
+        return _auto_crop_mode(len(paths))
     if want and len(paths) > 1:         # 多页不支持 gundam
         return False
     return want

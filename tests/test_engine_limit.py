@@ -177,24 +177,30 @@ class PageTokenMathTest(unittest.TestCase):
 
 # ── A6：切片策略（纯函数 + 尺寸判定）────────────────────────────
 class CropModeTest(_EngineBase):
-    def test_auto_long_shot_rule(self):
+    def test_auto_single_vs_multi(self):
+        """auto：单图一律 gundam；多页 base。
+
+        长截图不再被降级成 base——真机实测 600×3600 在 base 下文字不可读、
+        模型开始胡编甚至退化重复；同图 gundam 输出连贯正文（见
+        docs/实机测试报告.md §3.5 与 docs/token-budget.md）。
+        """
         f = ocr_engine._auto_crop_mode
         self.assertTrue(f(1, 100, 100))       # 普通单图 → gundam
-        self.assertTrue(f(1, 100, 300))       # h/w == 3 不算长截图（严格 >）
-        self.assertFalse(f(1, 100, 301))      # 长截图 → base
-        self.assertFalse(f(1, 100, 900))
+        self.assertTrue(f(1, 100, 300))       # h/w == 3 → gundam
+        self.assertTrue(f(1, 600, 3600))      # 超长截图 → 仍 gundam（正确性优先）
         self.assertFalse(f(2, 100, 100))      # 多页 → base
-        self.assertTrue(f(1, 0, 0))           # 尺寸未知 → 保守 gundam
+        self.assertTrue(f(1, 0, 0))           # 尺寸未知 → gundam
 
     def test_resolve_none_keeps_old_behavior(self):
         p = self._png("normal.png", 100, 100)
         self.assertIsNone(ocr_engine._resolve_crop_mode([p], None))
 
-    def test_resolve_auto_by_real_size(self):
+    def test_resolve_auto_ignores_aspect(self):
         normal = self._png("normal2.png", 100, 100)
         long_shot = self._png("long.png", 100, 500)
         self.assertTrue(ocr_engine._resolve_crop_mode([normal], "auto"))
-        self.assertFalse(ocr_engine._resolve_crop_mode([long_shot], "auto"))
+        # 长截图也走 gundam：auto 不再按长宽比降级（真机证伪过）
+        self.assertTrue(ocr_engine._resolve_crop_mode([long_shot], "auto"))
         self.assertFalse(ocr_engine._resolve_crop_mode([normal, normal], "auto"))
 
     def test_resolve_explicit_and_degrade(self):
@@ -214,9 +220,10 @@ class CropModeTest(_EngineBase):
         self.assertTrue(m1.calls[0]["crop_mode"])
         self.assertEqual(out["groups"], 1)
 
+        # 长截图在 auto 下也是 gundam（不再按长宽比降级，真机证伪过）
         m2 = _LayoutModel()
         self._engine(m2).recognize([long_shot], crop_mode="auto")
-        self.assertFalse(m2.calls[0]["crop_mode"])
+        self.assertTrue(m2.calls[0]["crop_mode"])
 
         m3 = _LayoutModel()
         self._engine(m3).recognize([normal, normal], crop_mode="auto")

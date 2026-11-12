@@ -1,16 +1,12 @@
 {
   "meta.nativeName": "English",
-
   "app.name": "OCR MiniTool",
-
   "nav.ocr": "Recognize",
   "nav.model": "Model",
   "nav.settings": "Settings",
-
   "view.ocr": "Image Recognition",
   "view.model": "Model & Device",
   "view.settings": "Settings",
-
   "status.notLoadedInitial": "Model not loaded",
   "status.ready": "Ready · {dev}",
   "status.loading": "Loading model…",
@@ -19,24 +15,20 @@
   "status.notLoaded": "Model not loaded",
   "status.notDownloaded": "Model not downloaded",
   "status.dirTip": "Model directory: {dir}",
-
   "drop.big": "Drop images here, or <b>click to browse</b>",
   "drop.sub": "Supports jpg / png / bmp / webp / tiff, multi-select; PDFs are converted page-by-page automatically",
   "drop.pick": "Choose files…",
-
   "ocr.modeTip": "Merged parsing = multiple files treated as pages of one document (cross-page context); Batch = each file recognized independently with its own result",
   "ocr.modeMerged": "Merged parsing",
   "ocr.modeBatch": "Batch",
   "ocr.promptTitle": "Recognition prompt (optional)",
   "ocr.promptDesc": "Leave empty for the model default (document parsing); type a custom prompt to fine-tune the output",
   "ocr.promptPlaceholder": "Default is Markdown document parsing; e.g. type \"extract tables only\" to focus on tables",
-
   "btn.run": "Start recognition",
   "btn.cancel": "Cancel",
   "btn.copy": "Copy all",
   "btn.save": "Save",
   "btn.openDir": "Open output folder",
-
   "prog.running": "Recognizing",
   "prog.uploading": "Uploading…",
   "prog.failed": "Failed",
@@ -47,7 +39,6 @@
   "prog.ticker": "{stage}… {chars} chars generated, {time} elapsed (slow CPU inference is normal)",
   "prog.batchItem": "Batch {i}/{n}: {name}",
   "prog.batchFile": "{label}… {stage}, elapsed {time}",
-
   "result.title": "Recognition result",
   "result.preview": "Preview",
   "result.raw": "Markdown",
@@ -60,14 +51,11 @@
   "result.historyMeta": "{chars} chars · saved file",
   "result.pageN": "Page {n}",
   "result.allPages": "All",
-
   "history.title": "Recent results",
   "history.delete": "Delete",
-
   "chip.ok": "Done",
   "chip.skipped": "Skipped",
   "chip.fail": "Failed",
-
   "model.envTitle": "Runtime environment",
   "model.engineTitle": "Inference engine (PyTorch runtime)",
   "model.engineDesc": "The app ships without PyTorch — pick the runtime matching your hardware and download it once. NVIDIA GPU users should choose CUDA.",
@@ -84,7 +72,6 @@
   "model.metaWeights": "Weights ~6.7 GB · BF16",
   "model.metaDir": "Directory {dir}",
   "model.metaMirror": "Mirror {m}",
-
   "env.deps": "Inference dependencies",
   "env.device": "Compute device",
   "env.notInstalled": "not installed",
@@ -120,14 +107,12 @@
   "err.envBusy": "Engine component download in progress — wait for it or cancel first.",
   "task.envDl": "Downloading engine component",
   "env.interpreter": "Python interpreter",
-
   "mstate.absent": "Not downloaded",
   "mstate.downloading": "Downloading…",
   "mstate.downloaded": "Downloaded · not loaded",
   "mstate.loading": "Loading…",
   "mstate.ready": "Ready ({dev})",
   "mstate.error": "Load failed",
-
   "set.modelDir": "Model download location",
   "set.modelDirDesc": "Storage directory for Unlimited-OCR-2; empty = models/Unlimited-OCR-2 under the app folder",
   "set.modelDirPlaceholder": "(empty = default location)",
@@ -148,7 +133,6 @@
   "set.scaleDesc": "Adjust text and control size",
   "set.lang": "Language",
   "set.langDesc": "Interface language",
-
   "set.pyTitle": "Python interpreter",
   "set.pyDesc": "The app normally runs in its bundled venv, whose PyTorch is CPU-only. Point it at another interpreter / venv (e.g. one with CUDA PyTorch); takes effect after an app restart",
   "set.pyCustom": "Custom interpreter",
@@ -159,7 +143,6 @@
   "set.pyApplyBtn": "Apply & restart",
   "set.pyResetBtn": "Use default",
   "set.pyResult": "Check result",
-
   "py.pathMissing": "Path does not exist: {path}",
   "py.notVenvDir": "Not a venv directory (missing Scripts/python.exe): {path}",
   "py.emptyPath": "Enter an interpreter path first (to restore the default, click \"Use default\")",
@@ -176,9 +159,7 @@
   "py.frozenUnsupported": "Interpreter switching is unavailable in the packaged build",
   "py.sameInterpreter": "That interpreter is already in use",
   "py.probeNotOk": "Dependency check failed: {err}",
-
   "about.desc": "Local inference · your data never leaves this computer",
-
   "msg.skippedFiles": "Skipped {n} unsupported file(s)",
   "msg.modeBatch": "Batch: each file is recognized independently with its own result (images and PDFs can be mixed)",
   "msg.modeMerged": "Merged: the files will be combined as pages of one document (cross-page context)",
@@ -197,15 +178,12 @@
   "msg.genericFailed": "Operation failed: {err}",
   "msg.dropOutside": "Drop files onto the dashed box above",
   "mode.offlineBanner": "Backend unreachable — demo mode is on; recognition and settings are disabled. Start the app from the desktop shortcut.",
-
   "time.sec": "{s} s",
   "time.min": "{m} min",
   "time.minSec": "{m} min {s} s",
-
   "task.download": "Model download",
   "task.load": "Model load",
   "task.ocr": "Recognition",
-
   "dl.done": "Download complete",
   "dl.cancelledResumable": "Cancelled (downloaded parts are kept; resume anytime)",
   "dl.failed": "Download failed: {err}",
@@ -213,16 +191,13 @@
   "dl.file": "Downloading {name}…",
   "dl.fileProgress": "Downloading {name}…  {mb} / {tmb} MB{speed}",
   "dl.fileDone": "Finished {name}",
-
   "load.done": "Model ready",
   "load.failed": "Load failed: {err}",
-
   "eng.loadingTokenizer": "Loading tokenizer…",
   "eng.loadingWeights": "Loading model weights ({device} · bfloat16)… ~6.7 GB, please wait",
   "eng.readyInfo": "Model ready ({device}, took {secs} s)",
   "eng.stageGundam": "Recognizing (gundam mode)",
   "eng.stageMerged": "Merged multi-page parsing ({n} pages total)",
-
   "err.busy": "A task is already running",
   "err.modelMissing": "Model not downloaded yet — download it first.",
   "err.modelNotLoaded": "Model not loaded yet — load it on the Model page first.",
@@ -241,20 +216,16 @@
   "err.noImages": "No recognizable images.",
   "err.noPages": "No recognizable pages (PDF conversion produced none).",
   "err.inference": "Inference failed: {err}",
-
   "err.needMultipart": "Files must be uploaded as multipart/form-data",
   "err.noContentLength": "Missing Content-Length",
   "err.emptyBody": "Request body is empty",
   "err.noFilesPart": "Missing \"files\" part",
   "err.emptyUpload": "Uploaded content is empty",
-
   "dlg.pickFolder": "Choose folder",
   "dlg.pickPython": "Choose Python interpreter (python.exe)",
   "dlg.quitBody": "{label} is still running.\n\nQuitting now will interrupt it.\nQuit anyway?",
-
   "out.pageMd": "## Page {n}",
   "out.pageTxt": "----- Page {n} -----",
-
   "mock.uploaded": "Upload complete",
   "mock.cancelled": "Cancelled",
   "mock.sampleFile": "sample.png",
@@ -269,20 +240,18 @@
   "mock.mergedText": "# Sample recognition result\n\nThis is the **demo-mode** sample output.",
   "mock.mergedPage": "Sample recognition result",
   "mock.dlProgress": "Downloading model-00001-of-00002.safetensors…  {done} / 6600 MB",
-
   "set.ocrSection": "Recognition parameters",
   "set.maxTokens": "Max tokens per page",
   "set.maxTokensDesc": "Max tokens generated per page/group; 0 = unlimited. Raise it if output gets truncated (slower).",
   "set.maxMergedPages": "Max merged pages",
   "set.maxMergedPagesDesc": "Max pages fed into one merged parse; 0 = unlimited. Lower it for very long documents to reduce truncation.",
   "set.cropMode": "Image slicing mode",
-  "set.cropModeDesc": "auto picks by image size; gundam = dynamic slicing (steadier for long docs); base = single-page basic mode.",
+  "set.cropModeDesc": "auto: gundam for single images, base for multi-page (upstream default); gundam tiles the image (better for long/small-text pages, slower); base is faster but squeezes very long images and may lose small text.",
   "set.cropAuto": "Auto",
   "set.cropGundam": "Gundam",
   "set.cropBase": "Base",
   "set.dropHeaders": "Drop headers and footers",
   "set.dropHeadersDesc": "Try to remove headers, footers and page numbers that repeat on every page.",
-
   "warn.truncatedTitle": "Output may be truncated",
   "warn.truncatedBody": "The model stopped at the generation limit (finish={finish}); this page/group may be incomplete.",
   "warn.pagesMismatchBody": "Page count mismatch: expected {expected}, got {actual}; cross-page content may be missing.",
@@ -296,12 +265,10 @@
   "chip.truncated": "Truncated",
   "chip.mismatch": "Page count",
   "result.viewError": "Error ›",
-
   "drop.pickDir": "Choose folder…",
   "files.summary": "{n} files · {size}",
   "btn.clearFiles": "Clear",
   "btn.retryFailed": "Retry failed",
-
   "msg.dirScanned": "Added {n} file(s) from the folder",
   "msg.dirScanTruncated": "Folder has many files — only the first {n} were added; recognize the rest in batches",
   "msg.dirLimitReached": "Pending files already reached the {n}-file limit; recognize or clear some first",

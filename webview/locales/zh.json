@@ -1,16 +1,12 @@
 {
   "meta.nativeName": "中文",
-
   "app.name": "OCR 小工具",
-
   "nav.ocr": "识别",
   "nav.model": "模型",
   "nav.settings": "设置",
-
   "view.ocr": "图片识别",
   "view.model": "模型与设备",
   "view.settings": "设置",
-
   "status.notLoadedInitial": "尚未加载模型",
   "status.ready": "已就绪 · {dev}",
   "status.loading": "模型加载中…",
@@ -19,24 +15,20 @@
   "status.notLoaded": "模型未加载",
   "status.notDownloaded": "模型未下载",
   "status.dirTip": "模型目录：{dir}",
-
   "drop.big": "拖拽图片到此，或<b>点击选择文件</b>",
   "drop.sub": "支持 jpg / png / bmp / webp / tiff，可多选；PDF 会自动逐页转图片识别",
   "drop.pick": "选择文件…",
-
   "ocr.modeTip": "合并解析＝多个文件当作同一文档的多页（跨页上下文）；批量识别＝每个文件独立识别、独立出结果",
   "ocr.modeMerged": "合并解析",
   "ocr.modeBatch": "批量识别",
   "ocr.promptTitle": "识别指令（可选）",
   "ocr.promptDesc": "留空使用模型默认指令（文档解析）；可输入自定义指令微调输出",
   "ocr.promptPlaceholder": "默认按文档解析输出 Markdown；例如输入“只提取表格”可聚焦表格内容",
-
   "btn.run": "开始识别",
   "btn.cancel": "取消",
   "btn.copy": "复制全文",
   "btn.save": "保存",
   "btn.openDir": "打开输出文件夹",
-
   "prog.running": "识别中",
   "prog.uploading": "上传中…",
   "prog.failed": "失败",
@@ -47,7 +39,6 @@
   "prog.ticker": "{stage}…已生成 {chars} 字，已用时 {time}（CPU 推理较慢属正常）",
   "prog.batchItem": "批量识别 第 {i}/{n} 个：{name}",
   "prog.batchFile": "{label}…{stage}，已用时 {time}",
-
   "result.title": "识别结果",
   "result.preview": "预览",
   "result.raw": "Markdown",
@@ -60,14 +51,11 @@
   "result.historyMeta": "{chars} 字 · 历史文件",
   "result.pageN": "第 {n} 页",
   "result.allPages": "全部",
-
   "history.title": "最近识别",
   "history.delete": "删除",
-
   "chip.ok": "完成",
   "chip.skipped": "未执行",
   "chip.fail": "失败",
-
   "model.envTitle": "运行环境",
   "model.engineTitle": "推理引擎（PyTorch 运行时）",
   "model.engineDesc": "安装包不含 PyTorch——按显卡选择组件下载一次即可。NVIDIA 显卡用户选 CUDA 版。",
@@ -84,7 +72,6 @@
   "model.metaWeights": "权重 ~6.7 GB · BF16",
   "model.metaDir": "目录 {dir}",
   "model.metaMirror": "镜像 {m}",
-
   "env.deps": "推理依赖",
   "env.device": "计算设备",
   "env.notInstalled": "未安装",
@@ -120,14 +107,12 @@
   "err.envBusy": "推理引擎组件正在下载，请等待完成或先取消。",
   "task.envDl": "下载推理引擎组件",
   "env.interpreter": "Python 解释器",
-
   "mstate.absent": "未下载",
   "mstate.downloading": "下载中…",
   "mstate.downloaded": "已下载 · 未加载",
   "mstate.loading": "加载中…",
   "mstate.ready": "已就绪（{dev}）",
   "mstate.error": "加载失败",
-
   "set.modelDir": "模型下载位置",
   "set.modelDirDesc": "Unlimited-OCR-2 的存储目录；留空＝程序目录下的 models/Unlimited-OCR-2",
   "set.modelDirPlaceholder": "（留空＝默认位置）",
@@ -148,7 +133,6 @@
   "set.scaleDesc": "调整文字与控件大小",
   "set.lang": "界面语言",
   "set.langDesc": "界面显示语言",
-
   "set.pyTitle": "Python 解释器",
   "set.pyDesc": "应用默认运行在自带 venv 里，其 PyTorch 为 CPU 版。可指向其他解释器 / venv（例如装有 CUDA 版 PyTorch 的环境），重启应用后生效",
   "set.pyCustom": "自定义解释器",
@@ -159,7 +143,6 @@
   "set.pyApplyBtn": "应用并重启",
   "set.pyResetBtn": "恢复默认",
   "set.pyResult": "检测结果",
-
   "py.pathMissing": "路径不存在：{path}",
   "py.notVenvDir": "该目录不是 venv（缺少 Scripts/python.exe）：{path}",
   "py.emptyPath": "请先填写解释器路径（恢复默认请点「恢复默认」）",
@@ -176,9 +159,7 @@
   "py.frozenUnsupported": "打包版不支持切换解释器（内置运行时）",
   "py.sameInterpreter": "该解释器就是当前正在使用的",
   "py.probeNotOk": "依赖检测未通过：{err}",
-
   "about.desc": "本地推理 · 数据不离开你的电脑",
-
   "msg.skippedFiles": "已跳过 {n} 个不支持的文件",
   "msg.modeBatch": "批量识别：每个文件独立识别、独立出结果（可混选图片和 PDF）",
   "msg.modeMerged": "合并解析：多个文件将作为同一文档的多页合并识别（跨页上下文）",
@@ -197,15 +178,12 @@
   "msg.genericFailed": "操作失败：{err}",
   "msg.dropOutside": "请把文件拖到上方的虚线框内",
   "mode.offlineBanner": "后端服务不可达 —— 当前为展示模式，识别与设置不会生效。请从桌面图标正常启动应用。",
-
   "time.sec": "{s} 秒",
   "time.min": "{m} 分钟",
   "time.minSec": "{m} 分 {s} 秒",
-
   "task.download": "下载模型",
   "task.load": "加载模型",
   "task.ocr": "识别中",
-
   "dl.done": "下载完成",
   "dl.cancelledResumable": "已取消（已下载部分保留，可续传）",
   "dl.failed": "下载失败：{err}",
@@ -213,16 +191,13 @@
   "dl.file": "下载 {name}…",
   "dl.fileProgress": "下载 {name}…  {mb} / {tmb} MB{speed}",
   "dl.fileDone": "完成 {name}",
-
   "load.done": "模型就绪",
   "load.failed": "加载失败：{err}",
-
   "eng.loadingTokenizer": "加载 tokenizer…",
   "eng.loadingWeights": "加载模型权重（{device} · bfloat16）…约 6.7 GB，请耐心等待",
   "eng.readyInfo": "模型就绪（{device}，耗时 {secs} s）",
   "eng.stageGundam": "识别中（gundam 模式）",
   "eng.stageMerged": "多页合并解析（共 {n} 页）",
-
   "err.busy": "已有任务进行中",
   "err.modelMissing": "模型尚未下载，请先下载模型。",
   "err.modelNotLoaded": "模型尚未加载，请先在「模型」页加载。",
@@ -241,20 +216,16 @@
   "err.noImages": "没有可识别的图片。",
   "err.noPages": "没有可识别的页面（PDF 转换后为空）。",
   "err.inference": "推理失败：{err}",
-
   "err.needMultipart": "需以 multipart/form-data 上传 files",
   "err.noContentLength": "缺少 Content-Length",
   "err.emptyBody": "请求体为空",
   "err.noFilesPart": "缺少 files 部件",
   "err.emptyUpload": "上传内容为空",
-
   "dlg.pickFolder": "选择文件夹",
   "dlg.pickPython": "选择 Python 解释器（python.exe）",
   "dlg.quitBody": "{label}尚未完成。\n\n现在退出将中断该任务。\n确定要退出吗？",
-
   "out.pageMd": "## 第 {n} 页",
   "out.pageTxt": "----- 第 {n} 页 -----",
-
   "mock.uploaded": "上传完成",
   "mock.cancelled": "已取消",
   "mock.sampleFile": "示例.png",
@@ -269,20 +240,18 @@
   "mock.mergedText": "# 示例识别结果\n\n这是**展示模式**的示例输出。",
   "mock.mergedPage": "示例识别结果",
   "mock.dlProgress": "下载 model-00001-of-00002.safetensors…  {done} / 6600 MB",
-
   "set.ocrSection": "识别参数",
   "set.maxTokens": "单页生成上限",
   "set.maxTokensDesc": "每页/每组最多生成的 token 数，0 = 不限制。输出被截断时调大（会更慢）。",
   "set.maxMergedPages": "合并页数上限",
   "set.maxMergedPagesDesc": "合并解析一次最多放入的页数，0 = 不限制。页数很多时调小可降低截断风险。",
   "set.cropMode": "图像切片模式",
-  "set.cropModeDesc": "auto 按图片尺寸自动选择；gundam 动态切片（长文档更稳）；base 单页基础模式。",
+  "set.cropModeDesc": "auto 单图用 gundam、多页用 base（与上游默认一致）；gundam 动态切片（长图/小字更准但更慢）；base 整页模式更快，但超长图会因压缩而丢失小字。",
   "set.cropAuto": "自动",
   "set.cropGundam": "Gundam",
   "set.cropBase": "基础",
   "set.dropHeaders": "页眉页脚去重",
   "set.dropHeadersDesc": "开启后尝试去掉每页重复出现的页眉、页脚与页码。",
-
   "warn.truncatedTitle": "输出可能被截断",
   "warn.truncatedBody": "模型在生成上限处停止（finish={finish}），本页/本组内容可能不完整。",
   "warn.pagesMismatchBody": "页数不符：期望 {expected} 页，实际 {actual} 页，跨页内容可能丢失。",
@@ -296,12 +265,10 @@
   "chip.truncated": "截断",
   "chip.mismatch": "页数不符",
   "result.viewError": "错误详情 ›",
-
   "drop.pickDir": "选择文件夹…",
   "files.summary": "{n} 个文件 · {size}",
   "btn.clearFiles": "清空",
   "btn.retryFailed": "重试失败项",
-
   "msg.dirScanned": "已从目录加入 {n} 个文件",
   "msg.dirScanTruncated": "目录文件较多，只取了前 {n} 个；其余请分批识别",
   "msg.dirLimitReached": "待识别文件已达 {n} 个上限，请先识别或清空部分文件",
