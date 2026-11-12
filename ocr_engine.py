@@ -483,6 +483,103 @@ def _last_finish(group_stats: list[dict]):
     return None
 
 
+# ── 视觉塔 dtype（A12）：CPU 上 bf16 vs fp32 的实测开关 ──────────
+# 背景（报告 01 + 实机数据）：CPU 上单页 prefill:decode ≈ 13:1，瓶颈是视觉塔
+# （sam_model + vision_model + projector）。这里把视觉塔单独切到 fp32 做 A/B，
+# 主干与 lm_head 仍是 bf16（换整模型 fp32 需 13.4 GB，16 GB 机器会换页）。
+VISION_DTYPE_ENV = "OCRMIT_VISION_DTYPE"
+_VISION_DTYPE_MODES = ("auto", "fp32", "bf16")
+_VISION_MODULE_NAMES = ("sam_model", "vision_model", "projector")
+
+# A/B 结论（2026-11-12 真机实测，产物 D:/Project/_work/a12/）：
+#   i7-10700（无 AVX512-BF16）CPU、crop_mode=base、max_page_tokens=256，
+#   同进程交错 bf16/fp32 各 3 样本（另有 1 次 warmup 不计）：
+#     test_small 520×160 : prefill 中位 47.3s(bf16) → 10.9s(fp32) = 4.35×
+#     test_long 600×2400 : prefill 中位 46.3s(bf16) → 10.9s(fp32) = 4.26×
+#   两次输出逐字节完全相同；decode 不受影响（8.3s/29.0s，两 dtype 一致）。
+#   ⇒ bf16 在这类 CPU 上走的是仿真路径（非原生），CPU 默认切 fp32 稳赚；
+#     GPU 上 bf16 有张量核，保持 bf16 不变。
+#   注意：结论的硬件前提是「无 AVX512-BF16/AMX 的 x86」。带原生 bf16 的新 CPU
+#   若实测 fp32 不快，可用 OCRMIT_VISION_DTYPE=bf16 覆盖。
+_AUTO_VISION_DTYPE_CPU = "fp32"
+
+
+def _normalize_vision_dtype_mode(value) -> str:
+    """OCRMIT_VISION_DTYPE 归一：auto / fp32 / bf16；空值/非法 → auto。"""
+    s = str(value or "").strip().lower()
+    return s if s in _VISION_DTYPE_MODES else "auto"
+
+
+def _resolve_vision_dtype(mode, device) -> str:
+    """把设置解析成视觉塔实际 dtype（"fp32" | "bf16"）。
+
+    auto：CPU → _AUTO_VISION_DTYPE_CPU（A/B 实测后定）；CUDA/其它 → bf16
+    （GPU 上 bf16 有原生算力，换 fp32 只会更慢也更占显存）。
+    显式 fp32/bf16 一律照办（供 A/B 与排障）。
+    """
+    mode = _normalize_vision_dtype_mode(mode)
+    if mode in ("fp32", "bf16"):
+        return mode
+    dev = str(device or "").lower()
+    return _AUTO_VISION_DTYPE_CPU if dev.startswith("cpu") else "bf16"
+
+
+def _map_tensor_tree(obj, fn):
+    """对 pytree（list/tuple/dict）里所有张量应用 fn，其余原样返回。
+
+    torch 延迟导入：本模块必须在没有 torch 的环境（测试/体检）也能 import。
+    """
+    import torch
+    if isinstance(obj, torch.Tensor):
+        return fn(obj)
+    if isinstance(obj, tuple):
+        return tuple(_map_tensor_tree(x, fn) for x in obj)
+    if isinstance(obj, list):
+        return [_map_tensor_tree(x, fn) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _map_tensor_tree(v, fn) for k, v in obj.items()}
+    return obj
+
+
+_BRIDGE_CLS = None
+
+
+def _dtype_bridge_cls():
+    """懒构造 _DtypeBridge（torch 可用时才定义 nn.Module 子类，便于无 torch 环境导入）。"""
+    global _BRIDGE_CLS
+    if _BRIDGE_CLS is None:
+        import torch
+        from torch import nn
+
+        class _DtypeBridge(nn.Module):
+            """视觉子模块的「入口转 fp32 / 出口转指定 dtype」适配层。
+
+            为什么不能简单 .float()：视觉塔输出要 scatter 进 **bf16** 的
+            inputs_embeds（modeling_unlimitedocr.py:785/:789），并与 bf16 的
+            image_newline / view_seperator 拼接（:752/:758/:762）。只转视觉塔
+            而不把输出转回模型 dtype 会 dtype 不匹配；反过来只转输入又会静默
+            降精度。故：
+              • 入口：模型传来的图/特征张量（bf16）→ fp32；
+              • 出口：projector 的输出 → 模型 dtype（bf16）；
+                sam/vision 的出口仍 fp32（内部整段 fp32 计算）。
+            张量实参/返回值按 pytree 递归转换，非张量（int/None/str）原样透传。
+            """
+
+            def __init__(self, inner, out_dtype):
+                super().__init__()
+                self.inner = inner
+                self.out_dtype = out_dtype
+
+            def forward(self, *args, **kwargs):
+                args = _map_tensor_tree(args, lambda t: t.to(torch.float32))
+                kwargs = _map_tensor_tree(kwargs, lambda t: t.to(torch.float32))
+                out = self.inner(*args, **kwargs)
+                return _map_tensor_tree(out, lambda t: t.to(self.out_dtype))
+
+        _BRIDGE_CLS = _DtypeBridge
+    return _BRIDGE_CLS
+
+
 class OcrEngine:
     """封装 Unlimited-OCR-2。recognize() 加互斥锁，多线程安全。"""
 
@@ -501,6 +598,11 @@ class OcrEngine:
         # 时 load() 直接返回，不再重复读 6.69 GB 权重。unload() 会清空。
         self._loaded_dir: Path | None = None
         self._last_infer: dict | None = None   # 最近一次 _infer 的度量（A1）
+        # 视觉塔 dtype（A12）：当前生效值 + 未被包桥的原模块（切换时复用，
+        # 避免套娃包装；unload() 里清空以免吊着旧模型子模块）。
+        self._vision_dtype = "bf16"
+        self._vision_orig: dict = {}
+        self._vision_mode = "auto"
 
     def generated_chars(self) -> int:
         """当前（或最近一次）识别已生成的可见字数。"""
@@ -687,6 +789,96 @@ class OcrEngine:
             self.ready = True
             self._loaded_dir = Path(self.model_dir)
         _s(tr("eng.readyInfo", device=device, secs=f"{time.time() - t0:.0f}"))
+        # A12：视觉塔 dtype 在加载完成后按 OCRMIT_VISION_DTYPE 生效
+        self._apply_vision_dtype_from_env()
+
+    # ── 视觉塔 dtype（A12）────────────────────────────────────
+    @property
+    def vision_dtype(self) -> str:
+        """视觉塔当前实际 dtype（"fp32" | "bf16"）。"""
+        return getattr(self, "_vision_dtype", "bf16")
+
+    def _model_dtype(self):
+        """主干参数 dtype（本模型恒为 bf16）；取不到时回退 torch.bfloat16。"""
+        torch = _torch()
+        try:
+            return next(self.model.parameters()).dtype
+        except Exception:
+            return torch.bfloat16
+
+    @staticmethod
+    def _vision_root(model):
+        """视觉塔挂载点：UnlimitedOCRForCausalLM.model 或裸 UnlimitedOCRModel。"""
+        if model is None:
+            return None
+        inner = getattr(model, "model", None)
+        if inner is not None and getattr(inner, "sam_model", None) is not None:
+            return inner
+        if getattr(model, "sam_model", None) is not None:
+            return model
+        return None
+
+    def _vision_modules(self):
+        """返回 (视觉塔根, {name: 当前挂载对象})；根缺失时 (None, {})。"""
+        root = self._vision_root(self.model)
+        if root is None:
+            return None, {}
+        mods = {n: getattr(root, n) for n in _VISION_MODULE_NAMES
+                if getattr(root, n, None) is not None}
+        return root, mods
+
+    def set_vision_dtype(self, mode=None) -> dict:
+        """切换视觉塔 dtype（不重载权重，只转换 sam/vision/projector）。
+
+        mode: None=读环境变量 OCRMIT_VISION_DTYPE；accept auto/fp32/bf16。
+
+        返回 {"mode","dtype","device","applied"}。bf16 是**完全 no-op**：
+        子模块恢复原对象、参数转回模型 dtype（若之前是 fp32），不做任何包装。
+        可反复调用（dtype 未变时立即返回），供同进程内交错 A/B 使用。
+        """
+        torch = _torch()
+        env_mode = os.environ.get(VISION_DTYPE_ENV) if mode is None else mode
+        mode_norm = _normalize_vision_dtype_mode(env_mode)
+        target = _resolve_vision_dtype(mode_norm, self.device)
+        info = {"mode": mode_norm, "dtype": target, "device": self.device,
+                "applied": False}
+        root, mods = self._vision_modules()
+        if root is None or not mods:
+            return info
+        if not self._vision_orig:       # 第一次切换：留下未被包桥的原模块
+            self._vision_orig = dict(mods)
+        if target == self._vision_dtype:
+            info["applied"] = True
+            return info
+        base_dtype = self._model_dtype()
+        if target == "fp32":
+            bridge_cls = _dtype_bridge_cls()
+            for name, orig in self._vision_orig.items():
+                orig.to(torch.float32)
+                # 只有 projector 的输出要回到模型 dtype（scatter/cat 的边界）
+                out_dtype = base_dtype if name == "projector" else torch.float32
+                setattr(root, name, bridge_cls(orig, out_dtype))
+        else:
+            for name, orig in self._vision_orig.items():
+                orig.to(base_dtype)
+                setattr(root, name, orig)
+        self._vision_dtype = target
+        self._vision_mode = mode_norm
+        info["applied"] = True
+        return info
+
+    def _apply_vision_dtype_from_env(self):
+        """load() 末尾按 OCRMIT_VISION_DTYPE 生效；失败不拖垮加载（记日志）。"""
+        try:
+            info = self.set_vision_dtype(None)
+            from applog import log_model
+            log_model(f"视觉塔 dtype 策略：mode={info['mode']} → {info['dtype']}"
+                      f"（device={info['device']}）")
+        except Exception as e:
+            from applog import log_error
+            log_error("视觉塔 dtype 切换失败，回退 bf16", exc=e)
+            self._vision_dtype = "bf16"
+            self._vision_orig = {}
 
     # ── PDF → 页图 ───────────────────────────────────────────
     @staticmethod
@@ -958,3 +1150,5 @@ class OcrEngine:
             self.ready = False
             self._loaded_dir = None
             self._last_infer = None
+            self._vision_orig = {}       # 别吊着旧模型的视觉子模块（~400 MB）
+            self._vision_dtype = "bf16"
