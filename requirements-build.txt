@@ -1,0 +1,17 @@
+# 构建期依赖（PyInstaller 打包用；运行时不需要，也不进发行包）
+#
+# 来源：同 .venv 的 *.dist-info 实测版本（v1.2.0 发行包就是用 pyinstaller 6.22.3
+#       打出来的，见 OCRMiniTool.spec）。版本锁定 = 构建产物可复现的前提之一。
+# 用法：
+#   pip install -r requirements-build.txt
+#   pyinstaller --clean --noconfirm --distpath dist --workpath build OCRMiniTool.spec
+#
+# 注意：构建 venv 里不要装 torch/torchvision（OCRMiniTool.spec 顶部预检会拒绝）；
+#       运行时依赖请另建环境装 requirements-lock.txt。
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.9
+# PyInstaller 的 Windows 依赖（随 pyinstaller 自动安装，这里锁定防漂移）
+altgraph==0.17.5
+pefile==2024.8.26
+pywin32-ctypes==0.2.3
+packaging==26.3

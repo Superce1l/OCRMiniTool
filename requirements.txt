@@ -1,9 +1,14 @@
-# OCRMiniTool - 运行环境依赖
+# OCRMiniTool - 运行环境依赖（下限；精确快照见 requirements-lock.txt）
 # 安装：pip install -r requirements.txt
+# 复现/CI：pip install -r requirements-lock.txt
+# 构建发行包：pip install -r requirements-build.txt（另见 README「重新打包」）
 #
-# 上游模型（baidu/Unlimited-OCR-2）验证过的版本组合：
-#   torch 2.13 / transformers 4.52.1 / huggingface-hub 0.36.0 /
+# 本仓实测/打包验证过的版本组合（来源：开发机 .venv 的 *.dist-info 与 v1.2.0
+# 发行包构建，2026-11 实测；不是照抄上游声明）：
+#   torch 2.8.0(+cpu/cu128) / transformers 4.52.1 / huggingface-hub 0.36.2 /
 #   tokenizers 0.21.4 / addict 2.4.0 / einops 0.8.2 / easydict 1.13
+# 兼容红线：torch 必须 <2.9。torch 2.10+ 移除了 _model_output_flatten 等内部
+# 符号，而 transformers 4.52.1 的 generation.utils 仍在引用（NameError 实录）。
 
 # WebView 界面：原生 WebView2 窗口（系统 runtime，不打包 Chromium）。
 # 仅用 pywebview「加载本机网址」开窗，前端与本机 HTTP server 走 HTTP/SSE。
@@ -15,12 +20,12 @@ pythonnet==3.1.0
 
 # 推理引擎。注意：Windows 上 pip 默认源装到的是 CPU 版 torch（检测不到
 # 任何 NVIDIA GPU）。要用 GPU（或要打包发行版，见 issue #3），必须先走
-# CUDA 源覆盖安装：
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-torch>=2.5
-torchvision>=0.20
+# CUDA 源覆盖安装（版本同样必须 <2.9，推荐与实测组合一致）：
+#   pip install torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu128
+torch>=2.5,<2.9
+torchvision>=0.20,<0.24
 
-# 模型加载与推理（版本与上游验证组合一致，勿随意升级 transformers）
+# 模型加载与推理（与实测组合一致；transformers 勿随意升级，torch 侧有强耦合）
 transformers==4.52.1
 tokenizers==0.21.4
 huggingface-hub>=0.36.0
@@ -36,6 +41,8 @@ tqdm>=4.60
 numpy>=1.24
 
 # PDF 识别（可选；不装则只能识别图片）
+# 实测会解析到 pymupdf 2.0，并连带安装 pymupdf4llm/onnxruntime 等依赖
+# （体积不小）；需要固定组合时用 requirements-lock.txt。
 pymupdf>=1.24
 
 # 删除历史记录到回收站（可选；缺失时回退 PowerShell）

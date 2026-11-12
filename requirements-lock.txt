@@ -1,0 +1,71 @@
+# 运行环境锁定版本（requirements.txt 的精确快照）
+#
+# 来源：OCRMiniTool/.venv/Lib/site-packages/*.dist-info 的 METADATA 实测读取
+#       （v1.2.0 开发机组合，2026-11-12；生成脚本 D:\Project\_work\gen_lock.py）
+# 用法：pip install -r requirements-lock.txt      # CI / 复现构建
+#       requirements.txt 是运行下限；本文件是同一套环境的 == 快照。
+# 范围：requirements.txt 根包 + 传递依赖（win32 / CPython 3.12 / AMD64 求值
+#       平台标记，extras 不计）。
+# 注意：torch/torchvision 在 .venv 里是 +cpu 本地版本（PyPI 默认源装的就是 CPU
+#       版）；这里去掉 +cpu 以便直装，版本号不变。GPU 请换 cu128 源，且必须仍是
+#       torch==2.8.0 / torchvision==0.23.0（torch 2.9+ 会破坏 transformers 4.52.1）。
+# 构建期依赖见 requirements-build.txt；未纳入本文件的 dev/构建包：
+#   altgraph==0.17.5, pefile==2024.8.26, py-spy==0.4.2, pyinstaller==6.22.3,
+#   pyinstaller-hooks-contrib==2026.9, pywin32-ctypes==0.2.3
+# 说明：hf-xet（huggingface_hub 的可选加速包）在 .venv 中未安装，故未锁定。
+
+# ── WebView 界面 ──────────────────────────────────────────────────────
+bottle==0.13.4
+cffi==2.1.1
+clr_loader==0.3.1
+proxy_tools==0.1.0
+pycparser==3.12
+pythonnet==3.1.0
+pywebview==6.2.1
+
+# ── 推理引擎（CPU 版）────────────────────────────────────────────────
+filelock==4.2.4
+fsspec==2026.9.0
+Jinja2==3.1.6
+MarkupSafe==3.0.4
+mpmath==1.3.0
+networkx==3.7
+setuptools==78.1.0
+sympy==1.14.0
+torch==2.8.0
+torchvision==0.23.0
+typing_extensions==4.16.0
+
+# ── 模型加载与推理 ────────────────────────────────────────────────────
+huggingface_hub==0.36.2
+numpy==2.5.4
+packaging==26.3
+pillow==13.0.0
+PyYAML==6.0.3
+regex==2026.9.29
+requests==2.34.2
+safetensors==0.8.0
+tokenizers==0.21.4
+tqdm==4.70.1
+transformers==4.52.1
+
+# ── 模型自定义代码依赖（trust_remote_code）────────────────────────────
+addict==2.4.0
+easydict==1.13
+einops==0.8.2
+
+# ── PDF / 网络 / 杂项（含 pymupdf 2.0 的传递依赖）─────────────────────
+certifi==2026.10.23
+charset-normalizer==3.5.2
+colorama==0.4.6
+flatbuffers==25.12.19
+idna==3.20
+onnxruntime==1.31.1
+protobuf==7.36.2
+psutil==7.2.2
+pymupdf==2.0
+pymupdf_layout==2.0
+pymupdf4llm==2.0
+Send2Trash==2.1.0
+tabulate==0.10.0
+urllib3==2.8.0

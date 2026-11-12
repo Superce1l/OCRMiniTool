@@ -2,7 +2,10 @@
 models/
 outputs/
 logs/
-settings.json
+/settings.json
+/settings.json.bak
+/settings.json.corrupt-*
+*.json.tmp
 *.log
 torchinductor_*/
 
@@ -17,3 +20,17 @@ dist/
 build_*/
 dist_*/
 runtime/
+*.zip
+
+# PyInstaller onedir 产物（从 dist 拷出来的发行目录）
+_internal/
+
+# 工具链缓存（ruff / pytest / mypy / 编辑器）
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.vscode/
+
+# Windows 杂项
+Thumbs.db
+desktop.ini

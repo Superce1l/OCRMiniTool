@@ -25,7 +25,7 @@
 - 📝 **结果预览 + 导出**：Markdown 实时渲染 / 原文切换、逐页查看、复制全文、
   另存 `.md` / `.txt`（输出格式在设置页选择）
 - ⏹️ **识别可中断**：流式解码 + 实时「已生成 N 字」，取消在 1～2 秒内生效
-- 🧩 **推理引擎按需下载**：安装包不含 PyTorch（~300MB 级）；模型页按显卡二选一
+- 🧩 **推理引擎按需下载**：安装包不含 PyTorch（~145MB 级；v1.2.0 实测 zip 约 144MB）；模型页按显卡二选一
   下载运行时组件——CPU（约 260MB）/ CUDA 12.8 · NVIDIA 专用（约 3.3GB，自带
   CUDA 运行时，无需装 Toolkit，需 570+ 驱动）。断点续传、装完即用；进入模型页
   时自动检测硬件并推荐（组件由 `build_components.py` 从官方 wheel 打包，
@@ -140,20 +140,38 @@ runtime_hook_utf8.py    # 冻结运行时 UTF-8 / 证书修复钩子
 - **数据文件**：`outputs\`（识别结果）、`logs\`（运行日志）、`settings.json`
   都生成在 exe 所在目录。
 
-重新打包：
+重新打包（依赖见 `requirements-build.txt`）：
 
 ```bat
-pip install pyinstaller
-pyinstaller --noconfirm --distpath dist --workpath build OCRMiniTool.spec
-rem 产出 dist\OCRMiniTool\（exe + _internal\）；发行 zip 打整个文件夹：
-powershell -NoProfile -Command "Compress-Archive -Path dist\OCRMiniTool -DestinationPath dist\OCRMiniTool-v1.1.2-windows-x64.zip -Force"
+rem 前置：构建环境里**不要装 torch/torchvision** —— OCRMiniTool.spec 顶部预检
+rem 会直接拒绝打包（安装包不含推理引擎，用户按显卡下载组件）。确需硬绕过时
+rem 才设 OCRMIT_ALLOW_BUNDLED_TORCH=1（Analysis 仍会排除 torch）。
+pip install -r requirements-build.txt
+pyinstaller --clean --noconfirm --distpath dist --workpath build OCRMiniTool.spec
+rem 产出 dist\OCRMiniTool\（exe + _internal\）；发行 zip 打整个文件夹。
+rem 包名里的版本号取自 version.py 的 APP_VERSION（勿手写；下文 <version> 处替换）：
+powershell -NoProfile -Command "Compress-Archive -Path dist\OCRMiniTool -DestinationPath dist\OCRMiniTool-v<version>-windows-x64.zip -Force"
 ```
+
+推理引擎组件（cpu / cu128）单独构建并发布到 GitHub Release：
+
+```bat
+uv run python build_components.py cpu     rem → dist_components/*-cpu.zip（约 260MB）
+uv run python build_components.py cu128   rem → 单个约 3.3GB zip + manifest.json（含 size/sha256）
+```
+
+- GitHub 单资产上限 2GB：cu128 整包需按 **1900 MiB** 切成两卷，命名
+  `ocrmini-runtime-torch<版本>-cu128.zip.part01-of-2` / `.part02-of-2`
+  （第二卷为余下部分）；应用内下载按卷续传后二进制约拼接。
+- 上传：cpu zip、cu128 两卷、`manifest.json` 到 Release（tag 与
+  `downloader._TORCH_TAG` 一致，当前 `runtime-torch2.8.0`），并在 Release
+  说明里贴出 sha256（当前应用只对账 Content-Length，整包哈希校验待补）。
 
 ### 源码执行
 
 ```bash
 cd OCRMiniTool
-pip install -r requirements.txt
+pip install -r requirements.txt        # 固定/复现环境用：pip install -r requirements-lock.txt
 python app_webview.py          # 启动 WebView 界面
 ```
 
@@ -162,11 +180,14 @@ python app_webview.py          # 启动 WebView 界面
 
 ### GPU 加速（可选）
 
-默认 pip 安装的是 CPU 版 torch。有 NVIDIA 显卡（驱动支持 CUDA 12.8+）时：
+默认 pip 安装的是 CPU 版 torch。有 NVIDIA 显卡（驱动支持 CUDA 12.8+）时，按实测组合覆盖安装：
 
 ```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128 --force-reinstall
+pip install torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu128 --force-reinstall
 ```
+
+> torch 必须 `<2.9`：2.10+ 移除了 `_model_output_flatten` 等内部符号，而
+> `transformers==4.52.1` 仍在引用（装了更高版本会得到 `NameError`）。
 
 > 一键启动（run.bat）首次运行会在 `%LOCALAPPDATA%\OCRMiniTool\venv` 建独立
 > venv（CPU 版 torch，不污染全局环境）。想用 CUDA 但不想动这个 venv，推荐
@@ -208,7 +229,7 @@ python downloader.py [目标目录]     # 不启动界面，直接下载/续传
 |------|------|
 | 操作系统 | Windows 10 / 11（64-bit） |
 | 内存 | 16 GB 以上（权重 6.7 GB + 运行开销） |
-| 硬盘 | 8 GB（模型 6.8 GB + 系统） |
+| 硬盘 | 12 GB 以上（模型 6.8 GB + CUDA 组件 3.3 GB + 程序与输出；不装 CUDA 组件约 8 GB） |
 | GPU | 可选：NVIDIA（CUDA 12.8+）≥8 GB 显存；无 GPU 走 CPU |
 | WebView2 | Windows 11 内建；Windows 10 需安装 Edge WebView2 Runtime（缺失时自动改用 Edge --app 窗口） |
 

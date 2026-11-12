@@ -1,0 +1,39 @@
+# 工具链配置。本项目不作为 Python 包发布，只用 [tool.*] 表；
+# 对照 ../STTMiniTool 的同名配置（分级治理：门禁只挡「真实错误」级，
+# 风格/类型问题在存量代码清偿后逐级收紧，避免一次性大改淹没真实回归）。
+#
+#   ruff check .        — 门禁：语法/未定义名/重复定义等真实错误
+#   mypy                — 门禁：纯逻辑层类型检查（files 见下）
+#   unittest discover   — 门禁：单元测试（tests/，stdlib unittest，见 tests/run_tests.py）
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [
+    ".venv", "build", "dist", "dist_components",  # 环境 / PyInstaller 产物
+    "runtime", "models", "outputs", "logs",       # 运行产物 / 模型 / 日志
+    "_work", "docs",                              # 临时探查目录 / 文档
+]
+
+[tool.ruff.lint]
+# E9：语法错误；F63/F7：无效语法级；F82：未定义名（F821/F822）；F811：重复定义。
+# 风格类（E4/E5/E7/W/UP/B/SIM…）暂不入门禁——存量债务另批清偿。
+select = ["E9", "F63", "F7", "F82", "F811"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+no_strict_optional = true
+check_untyped_defs = true
+# 先覆盖纯逻辑层（零重依赖、可静态验证）；界面/后端大文件待拆分后逐个加入。
+files = [
+    "applog.py",
+    "settings_store.py",
+    "version.py",
+]
+
+[tool.pytest.ini_options]
+# 项目测试用 stdlib unittest（tests/run_tests.py）；这段配置只是让
+# 「顺手装过 pytest 的人」直接 pytest 时也落在同一目录/命名规则上。
+testpaths = ["tests"]
+python_files = ["test_*.py"]
