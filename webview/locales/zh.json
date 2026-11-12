@@ -182,7 +182,7 @@
   "msg.skippedFiles": "已跳过 {n} 个不支持的文件",
   "msg.modeBatch": "批量识别：每个文件独立识别、独立出结果（可混选图片和 PDF）",
   "msg.modeMerged": "合并解析：多个文件将作为同一文档的多页合并识别（跨页上下文）",
-  "msg.cancelRequested": "已请求取消，识别会在 1～2 秒内中断",
+  "msg.cancelRequested": "已请求取消，解码阶段会在 1～2 秒内中断（视觉编码阶段需等当前前向结束）",
   "msg.batchDone": "批量识别完成（{ok}/{total} 成功，{time}）",
   "msg.done": "识别完成（{time}）→ {path}",
   "msg.failed": "识别失败：{err}",

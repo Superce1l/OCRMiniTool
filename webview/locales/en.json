@@ -182,7 +182,7 @@
   "msg.skippedFiles": "Skipped {n} unsupported file(s)",
   "msg.modeBatch": "Batch: each file is recognized independently with its own result (images and PDFs can be mixed)",
   "msg.modeMerged": "Merged: the files will be combined as pages of one document (cross-page context)",
-  "msg.cancelRequested": "Cancellation requested; recognition stops within 1–2 seconds",
+  "msg.cancelRequested": "Cancellation requested; decoding stops within 1–2 seconds (the current vision-encoder forward pass must finish first)",
   "msg.batchDone": "Batch finished ({ok}/{total} succeeded, {time})",
   "msg.done": "Recognition finished ({time}) → {path}",
   "msg.failed": "Recognition failed: {err}",
