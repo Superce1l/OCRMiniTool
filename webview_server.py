@@ -63,6 +63,18 @@ HTTP_LOG = (os.environ.get("OCRMT_HTTP_LOG") or "").strip().lower() not in (
     "", "0", "false", "no", "off")
 
 
+def _exc_status(exc: BaseException, default: int = 500) -> int:
+    """业务异常自带的 HTTP 状态码（RecognizeLimitError=400 / BusyError=409）。
+
+    非法/缺失一律回落 default（5xx）：绝不把一个坏 status 属性变成非法响应码。
+    """
+    try:
+        code = int(getattr(exc, "status", default) or default)
+    except (TypeError, ValueError):
+        return default
+    return code if 100 <= code <= 599 else default
+
+
 def resolve_web_dir() -> Path:
     """前端资产目录：源码用项目 webview/；PyInstaller 冻结时用 _MEIPASS。"""
     if getattr(sys, "frozen", False):
@@ -369,7 +381,8 @@ class WebViewServer:
                 """统一错误响应；400/403 记一行 WARN（5xx 由调用方记 ERROR）。
 
                 logged=True 表示调用方已经记过这条错误（如 A9 护栏拒绝），
-                避免同一次拒绝在日志里出现两行。
+                避免同一次拒绝在日志里出现两行。409（忙）由各调用的 catch 点
+                记 INFO——这里不再记，保证一次拒绝只有一行日志。
                 """
                 if not logged and code in (400, 403):
                     try:
@@ -553,9 +566,23 @@ class WebViewServer:
                     # 兜底：请求体可能没读完（keep-alive 残留体会串成下一个
                     # 请求的起始行），先排空再回应。日志必须留 —— 以前这里
                     # 不写日志，500 在 applog 里完全查不到。
-                    log_error(f"POST {path} 处理失败", exc=e)
+                    # 业务异常带 status：409（忙）记 INFO、400（护栏）记 WARN，
+                    # 都只记一次（_err logged=True）；其余仍按 500/ERROR。
+                    code = _exc_status(e)
                     self._drain_body()
-                    return self._err(500, str(e))
+                    if code >= 500:
+                        log_error(f"POST {path} 处理失败", exc=e)
+                        return self._err(code, str(e))
+                    head = (str(e).splitlines()[0][:300] if str(e)
+                            else type(e).__name__)
+                    try:
+                        if code == 409:
+                            log_info(f"POST {path} 拒绝（409 忙）：{head}")
+                        else:
+                            log_warn(f"POST {path} 拒绝（HTTP {code}）：{head}")
+                    except Exception:
+                        pass
+                    return self._err(code, head, logged=True)
 
             def _shutdown(self):
                 import threading as _t
@@ -698,12 +725,13 @@ class WebViewServer:
                             server.hub.publish("progress", {"pct": pct, "status": status}))
                         return self._json(result)
                     except Exception as e:
-                        # A9 护栏等业务拒绝带 status=400：WARN 一行即可，
-                        # 其余仍按 500/ERROR 记录（保持既有排查口径）。
+                        # A9 护栏(400)/忙(409) 等业务拒绝只记一行；其余 ERROR。
                         code = getattr(e, "status", 500)
                         head = (str(e).splitlines()[0][:300]
                                 if str(e) else type(e).__name__)
-                        if code == 400:
+                        if code == 409:
+                            log_info(f"识别被拒绝（忙）：{primary_name}（{head}）")
+                        elif code == 400:
                             log_warn(f"识别被拒绝：{primary_name}（{head}）")
                         else:
                             log_error(f"识别失败：{primary_name}", exc=e)
@@ -736,7 +764,9 @@ class WebViewServer:
                     code = getattr(e, "status", 500)
                     head = (str(e).splitlines()[0][:300] if str(e)
                             else type(e).__name__)
-                    if code == 400:
+                    if code == 409:
+                        log_info(f"识别被拒绝（忙）：{primary_name}（{head}）")
+                    elif code == 400:
                         log_warn(f"识别被拒绝：{primary_name}（{head}）")
                     else:
                         log_error(f"识别失败：{primary_name}", exc=e)

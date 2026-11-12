@@ -42,6 +42,7 @@ import traceback
 from pathlib import Path
 
 from version import APP_VERSION
+import page_range
 
 # ── 退出码（docs/cli.md 的表格与这里保持一致）─────────────────────
 EXIT_OK = 0            # 全部成功
@@ -171,15 +172,8 @@ def _msg(lang: str, key: str, **params) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════
-# 纯函数 1：--pages 解析
+# 纯函数 1：--pages 解析（真正的实现在 page_range.py，GUI/引擎共用）
 # ══════════════════════════════════════════════════════════════════
-def _page_int(token: str, spec: str) -> int:
-    try:
-        return int(token)
-    except (TypeError, ValueError):
-        raise CliError(f"not an integer: {token!r}") from None
-
-
 def parse_pages(spec: str | None, total_pages: int | None = None) -> list[int]:
     """解析 "1-3,5,10-" → 升序去重的 1-based 页号列表。
 
@@ -187,50 +181,15 @@ def parse_pages(spec: str | None, total_pages: int | None = None) -> list[int]:
     • `total_pages` 给定时**越界夹取**：单页号与区间端点都夹到 [1, total_pages]，
       夹取产生的重复页由去重吸收（"1-3,5" + total=3 → [1,2,3]）
     • 空串/None → []（表示"不筛选"）；语法错误一律 CliError
+
+    薄包装：解析逻辑已迁到 `page_range.parse_pages`（GUI 设置 pdfPageRange 与
+    引擎 pdf_to_images 用同一份实现），这里只把 ValueError 转成 CliError，
+    错误文案逐字保持历史形态（tests/test_cli.py 依赖）。
     """
-    if spec is None:
-        return []
-    text = str(spec).strip()
-    if not text:
-        return []
-    picked: set[int] = set()
-    for raw in text.replace("，", ",").split(","):
-        token = raw.strip()
-        if not token:
-            continue
-        if "-" in token:
-            head, _, tail = token.partition("-")
-            head, tail = head.strip(), tail.strip()
-            if not head:
-                raise CliError(f"missing start in {token!r}")
-            start = _page_int(head, text)
-            if start < 1:
-                raise CliError(f"bad range {token!r}")
-            if tail == "":
-                if total_pages is None:
-                    raise CliError(f"open range {token!r} needs total page count")
-                end = int(total_pages)
-            else:
-                end = _page_int(tail, text)
-                if end < start:
-                    raise CliError(f"bad range {token!r}")
-            if total_pages is not None:
-                if total_pages < 1:
-                    continue
-                # 越界夹取：开区间起点 > 总页数时夹到最后一页（"10-" + 5 页 → [5]）
-                start = min(start, int(total_pages))
-                end = min(max(end, start), int(total_pages))
-            picked.update(range(start, end + 1))
-        else:
-            page = _page_int(token, text)
-            if page < 1:
-                raise CliError(f"page must be >= 1: {token!r}")
-            if total_pages is not None:
-                if total_pages < 1:
-                    continue
-                page = min(page, int(total_pages))
-            picked.add(page)
-    return sorted(picked)
+    try:
+        return page_range.parse_pages(spec, total_pages)
+    except ValueError as e:
+        raise CliError(str(e)) from None
 
 
 # ══════════════════════════════════════════════════════════════════

@@ -31,6 +31,8 @@ from downloader import (CancelledError, _TORCH_VERSION, download_model,
                         set_mirror)
 from i18n import available_languages, set_lang, tr
 from ocr_engine import EngineError, OcrEngine
+from page_range import is_valid_spec as _is_valid_page_spec
+from page_range import parse_pages as _parse_page_spec
 from settings_store import SettingsStore
 from version import APP_VERSION
 
@@ -60,6 +62,10 @@ DEFAULT_SETTINGS = {
     "maxMergedPages": 20,    # 合并请求的页数上限；0 = 不限；合法 0 或 [1, 200]
     "cropMode": "auto",      # auto | gundam | base
     "dropHeaders": False,    # 是否丢弃页眉页脚块
+    # ── E7 / E12 / E14：页范围与后处理开关 ──────────────────────
+    "pdfPageRange": "",      # 仅 PDF：如 "1-3,5,10-"；空 = 全部页
+    "joinLines": False,      # 后处理：把硬换行拆开的同段文本接回去
+    "cjkSpacing": False,     # 后处理：中英文/数字之间补空格
 }
 
 # 目录扫描 / 路径直读共用：允许的扩展名（与 ocr_engine 的图片扩展 + pdf 对齐）
@@ -70,7 +76,8 @@ MAX_SCAN_DEPTH = 64          # 目录深度硬上限
 MAX_RECOGNIZE_PATHS = 200    # 一次识别允许的路径数上限（与上传链路同量级）
 
 _CROP_MODES = ("auto", "gundam", "base")
-_ENGINE_GROUP_KWARGS = ("max_page_tokens", "max_merged_pages", "drop_headers")
+_ENGINE_GROUP_KWARGS = ("max_page_tokens", "max_merged_pages", "drop_headers",
+                        "page_range", "join_lines", "cjk_spacing")
 
 # ── A9：识别请求护栏（页数 / 单文件体积）──────────────────────────
 # 100+ 页 PDF 一次请求会同时驻留 GB 级 PIL 与临时 PNG（A8 未做），最坏生成
@@ -88,6 +95,16 @@ class RecognizeLimitError(EngineError):
     status = 400
 
 
+class BusyError(EngineError):
+    """已有任务在跑（下载/加载/组件安装/识别）：HTTP 409。
+
+    前端按 409 走「稍后再试」的轻提示，服务端只记 INFO——这是正常的并发
+    语义，不是故障（旧实现返回 200 + {"ok": false}，前端只能靠文案猜）。
+    """
+
+    status = 409
+
+
 def _pdf_page_count(path: Path) -> int:
     """PDF 页数；缺 pymupdf / 文件损坏等任何异常返回 0（未知 → 不拦）。"""
     try:
@@ -101,17 +118,42 @@ def _pdf_page_count(path: Path) -> int:
         return 0
 
 
-def _check_recognize_limits(paths, *, batch: bool = False) -> None:
+def _selected_page_count(path: Path, page_range: str = "") -> int:
+    """护栏用的「本次实际要识别的页数」。
+
+    • 非 PDF → 1
+    • PDF 无页范围 → 实际页数（0 = 未知，不计入）
+    • PDF 有页范围 → `parse_pages(spec, total)` 的长度（夹取/去重后）。
+      规格非法时**跳过页范围**（按实际页数计），把 err.badPageRange 留给引擎报，
+      避免同一个非法输入在护栏层先变成一条误导性的「页数超限」。
+    """
+    if path.suffix.lower() != ".pdf":
+        return 1
+    pages = _pdf_page_count(path)
+    spec = str(page_range or "").strip()
+    if not spec or pages <= 0:
+        return pages
+    try:
+        return len(_parse_page_spec(spec, pages))
+    except ValueError:
+        return pages
+
+
+def _check_recognize_limits(paths, *, batch: bool = False,
+                            page_range: str = "") -> None:
     """A9 护栏：单文件体积超限或页数超限 → RecognizeLimitError。
+
+    必须在 `self.recognizing = True` **之前** 调用——这里抛错时还没置忙，
+    不会把后端永久卡在 busy。stat 失败（不存在/无权限）跳过，交给引擎报
+    更具体的原因（err.noPymupdf / 读图失败）。
 
     batch=False（合并解析）：累计所有文件页数（PDF 按实际页数、图片=1），
     超出 MAX_RECOGNIZE_PAGES 即拦。
     batch=True（批量识别）：只看单个文件是否超页数；总量不受页数上限约束
     （文件数上限由 MAX_RECOGNIZE_PATHS 管）。
-
-    必须在 `self.recognizing = True` **之前** 调用——这里抛错时还没置忙，
-    不会把后端永久卡在 busy。stat 失败（不存在/无权限）跳过，交给引擎报
-    更具体的原因（err.noPymupdf / 读图失败）。
+    page_range（E7 联动）：PDF 设了页范围时按**选中页数**计——否则「500 页
+    PDF 只选 5 页」会被 150 页上限误拦。规格非法时跳过页范围（按实际页数），
+    由引擎报 err.badPageRange。
     """
     total_pages = 0
     for p in paths:
@@ -125,7 +167,7 @@ def _check_recognize_limits(paths, *, batch: bool = False) -> None:
             raise RecognizeLimitError(
                 tr("err.fileTooLarge", name=p.name, mb=f"{mb:.1f}",
                    limit=MAX_RECOGNIZE_FILE_MB))
-        pages = _pdf_page_count(p) if p.suffix.lower() == ".pdf" else 1
+        pages = _selected_page_count(p, page_range)
         if batch:
             # 单文件超页数：批量也不会把它拆开，整份仍会落到一次引擎调用
             if pages > MAX_RECOGNIZE_PAGES:
@@ -223,6 +265,18 @@ def normalize_settings_patch(patch: dict) -> tuple[dict, dict | None]:
         if v is None:
             return {}, _bad_value("dropHeaders", out["dropHeaders"])
         out["dropHeaders"] = v
+    if "pdfPageRange" in out:
+        v = str(out["pdfPageRange"] if out["pdfPageRange"] is not None
+                else "").strip()
+        if v and not _is_valid_page_spec(v):
+            return {}, _bad_value("pdfPageRange", out["pdfPageRange"])
+        out["pdfPageRange"] = v
+    for key in ("joinLines", "cjkSpacing"):
+        if key in out:
+            v = _as_bool(out[key])
+            if v is None:
+                return {}, _bad_value(key, out[key])
+            out[key] = v
     return out, None
 
 
@@ -390,6 +444,10 @@ class WebBackend:
                 "maxMergedPages": cur.get("maxMergedPages", 20),
                 "cropMode": cur.get("cropMode", "auto"),
                 "dropHeaders": bool(cur.get("dropHeaders", False)),
+                # E7 / E12 / E14：页范围与后处理开关
+                "pdfPageRange": str(cur.get("pdfPageRange") or ""),
+                "joinLines": bool(cur.get("joinLines", False)),
+                "cjkSpacing": bool(cur.get("cjkSpacing", False)),
                 "languages": available_languages(),
                 "defaultModelDir": str(BASE_DIR / MODEL_SUBDIR),
                 # 源码运行才可切换解释器；PyInstaller 冻结版前端隐藏该设置
@@ -487,7 +545,7 @@ class WebBackend:
         with self._lock:
             if self.downloading or self.loading or self.recognizing \
                     or self.env_downloading:
-                return {"ok": False, "error": tr("err.busy")}
+                raise BusyError(tr("err.busy"))
             self.downloading = True
             self._task_label = tr("task.download")
         self.cancel_event.clear()
@@ -529,9 +587,9 @@ class WebBackend:
     def start_load(self) -> dict:
         with self._lock:
             if self.loading or self.downloading or self.recognizing:
-                return {"ok": False, "error": tr("err.busy")}
+                raise BusyError(tr("err.busy"))
             if self.env_downloading:
-                return {"ok": False, "error": tr("err.envBusy")}
+                raise BusyError(tr("err.envBusy"))
             if not quick_check(self._model_dir()):
                 return {"ok": False, "error": tr("err.modelMissing")}
             if not (quick_check_torch(self._torch_flavor(persist=True))
@@ -677,7 +735,7 @@ class WebBackend:
         with self._lock:
             if self.env_downloading or self.downloading or self.loading \
                     or self.recognizing:
-                return {"ok": False, "error": tr("err.busy")}
+                raise BusyError(tr("err.busy"))
             if quick_check_torch(flavor):
                 return {"ok": True, "already": True}
             # 切换组件（已装 A、要装 B）在运行中必然失败：进程已把旧 runtime 下的
@@ -727,13 +785,23 @@ class WebBackend:
         return True
 
     # ── OCR 识别 ─────────────────────────────────────────────
+    def _page_range_setting(self) -> str:
+        """当前设置的 PDF 页范围（读不到设置时按"不筛选"处理，绝不因此拦识别）。"""
+        try:
+            return str(self._settings_raw().get("pdfPageRange") or "").strip()
+        except Exception:
+            return ""
+
     def _engine_recognize_kwargs(self) -> dict:
-        """把四个识别参数设置翻译成引擎关键字。
+        """把识别参数设置翻译成引擎关键字。
 
         cropMode 原样透传给引擎（"auto" / "gundam" / "base"）：引擎的 "auto"
         才会按图片形状自动降级长截图（高宽比 > 3 → base，CPU 上 2–5×），
         映射成 None 等于退回旧行为、让这个开关失效（实测过的缺陷）。
         脏值（空/未知）一律回落 "auto"。
+
+        E7 / E12 / E14：page_range（仅 PDF 生效）、join_lines、cjk_spacing。
+        旧引擎不认识这些关键字时由 `_call_engine_recognize` 的签名探测裁掉。
         """
         cur = self._settings_raw()
         crop = str(cur.get("cropMode") or "auto").strip().lower()
@@ -744,6 +812,9 @@ class WebBackend:
             "max_merged_pages": _as_int(cur.get("maxMergedPages")) or 0,
             "drop_headers": bool(cur.get("dropHeaders", False)),
             "crop_mode": crop,
+            "page_range": str(cur.get("pdfPageRange") or "").strip(),
+            "join_lines": bool(cur.get("joinLines", False)),
+            "cjk_spacing": bool(cur.get("cjkSpacing", False)),
         }
 
     def _call_engine_recognize(self, image_paths, **kwargs) -> dict:
@@ -788,14 +859,15 @@ class WebBackend:
         with self._lock:
             if self.recognizing or self.loading or self.downloading \
                     or self.env_downloading:
-                raise EngineError(tr("err.busy"))
+                raise BusyError(tr("err.busy"))
             if not self.engine.ready:
                 raise EngineError(tr("err.modelNotLoaded"))
             paths = [Path(p) for p in (opts.get("paths") or [])]
             if not paths:
                 raise EngineError(tr("err.noFiles"))
-            _check_recognize_limits(paths,
-                                    batch=(opts.get("mode") == "batch"))
+            # E7 联动：PDF 页范围只算选中页，避免「大 PDF 只选几页」被 150 页误拦
+            _check_recognize_limits(paths, batch=(opts.get("mode") == "batch"),
+                                    page_range=self._page_range_setting())
             self.recognizing = True
             self._task_label = tr("task.ocr")
         self.cancel_event.clear()
@@ -862,10 +934,10 @@ class WebBackend:
                 "elapsed": elapsed,
                 "cancelled": False,
             }
-            # 引擎新增的中性字段原样透传（截断/页数不符/分组/丢弃块）；旧引擎
-            # 没有这些键就自然缺省，不报错。
+            # 引擎新增的中性字段原样透传（截断/页数不符/分组/丢弃块/表格告警）；
+            # 旧引擎没有这些键就自然缺省，不报错。
             for key in ("truncated", "pagesMismatch", "finishReason",
-                        "groups", "droppedBlocks", "tokens"):
+                        "groups", "droppedBlocks", "tokens", "tableWarnings"):
                 if key in result:
                     payload[key] = result[key]
             # 期望页数 / 实际页数：界面提示条要说清「期望 N 页、实际 M 页」，
@@ -977,8 +1049,9 @@ class WebBackend:
                             "outPath": str(out_path),
                             "elapsed": result.get("elapsed", 0),
                             "chars": chars}
-                    # 批量条目也带截断/页数不符标记（引擎缺省时自然不带）
-                    for key in ("truncated", "pagesMismatch", "finishReason"):
+                    # 批量条目也带截断/页数不符/表格告警标记（引擎缺省时自然不带）
+                    for key in ("truncated", "pagesMismatch", "finishReason",
+                                "tableWarnings"):
                         if key in result:
                             item[key] = result[key]
                     inf = result.get("infer")

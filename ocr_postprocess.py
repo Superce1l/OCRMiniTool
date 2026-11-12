@@ -332,12 +332,278 @@ def _drop_empty_heads(items):
             if not (it.lstrip().startswith('#') and not it.lstrip().lstrip('#').strip())]
 
 
-def _convert_impl(result, drop_headers=False, stats=None):
-    """convert() 的实现体：返回 Markdown 字符串，丢弃统计写进 stats。
+# ── 文本规整（E13 LaTeX / E12 去断行+中英空格 / E14 表格校验）──────
+# 四个函数都是「纯文本进、纯文本出」的独立纯函数：不依赖 layout 块结构，
+# 可单独测试与复用。管线顺序见 _finalize_text()（两条入口共用）。
+_FENCE_RE = re.compile(r'^\s*```')
+_INLINE_CODE_RE = re.compile(r'`[^`\n]*`')
+_LATEX_INLINE_RE = re.compile(r'\\\((.+?)\\\)', re.S)
+_LATEX_BLOCK_RE = re.compile(r'\\\[(.+?)\\\]', re.S)
+_BLANK_LINE_RE = re.compile(r'\n[ \t]*\n')
 
-    对外契约不变：`convert(result, drop_headers=False) -> str`；
-    需要丢弃块数时用 `convert_with_stats()`。
+
+def _map_outside_code(text, fn):
+    """对 ``` 围栏之外的片段应用 fn；围栏内的行原样保留。"""
+    out, buf, in_fence = [], [], False
+
+    def _flush(is_code):
+        if buf:
+            chunk = '\n'.join(buf)
+            out.append(chunk if is_code else _map_outside_inline(chunk, fn))
+            buf.clear()
+
+    for line in text.split('\n'):
+        if _FENCE_RE.match(line):
+            _flush(in_fence)
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        buf.append(line)
+    _flush(in_fence)
+    return '\n'.join(out)
+
+
+def _map_outside_inline(chunk, fn):
+    """对行内 `code` 之外的片段应用 fn（code 原样保留）。"""
+    out, pos = [], 0
+    for m in _INLINE_CODE_RE.finditer(chunk):
+        out.append(fn(chunk[pos:m.start()]))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(fn(chunk[pos:]))
+    return ''.join(out)
+
+
+def normalize_latex(text):
+    """LaTeX 定界符归一：`\\(...\\)` → `$...$`、`\\[...\\]` → `$$...$$`。
+
+    支持跨行块公式（`\\[ ... \\]` 内部可含换行）；跳过 ``` 代码围栏与行内
+    `code`。幂等：转换后不再含这两个定界符，二次调用无变化。
     """
+    if not text:
+        return text or ''
+
+    def _conv(chunk):
+        def _block(m):
+            inner = m.group(1)
+            # 防御：跨空行的 `\[ ... \]` 不是块公式（多半是输出里孤立的转义
+            # 方括号），原样保留，避免把整页吞进一个 $$ 里
+            if _BLANK_LINE_RE.search(inner):
+                return m.group(0)
+            return '$$' + inner.strip() + '$$'
+
+        def _inline(m):
+            inner = m.group(1)
+            if '\n' in inner:            # 行内公式不跨行，避免误吞大段正文
+                return m.group(0)
+            return '$' + inner.strip() + '$'
+
+        chunk = _LATEX_BLOCK_RE.sub(_block, chunk)
+        return _LATEX_INLINE_RE.sub(_inline, chunk)
+
+    return _map_outside_code(text, _conv)
+
+
+_SENTENCE_END = set('。！？；：、.!?;:,…') | set('」』）】》〉”’"\'')
+_LIST_LINE_RE = re.compile(r'^(?:[-*+]\s|\d+[.)]\s)')
+
+
+def _is_block_line(s):
+    """该行是否为不可合并的结构行（标题/列表/表格/引用/HTML/围栏）。"""
+    if not s:
+        return True
+    if s.startswith(('#', '|', '>', '<', '```')):
+        return True
+    if s.endswith('-->'):        # HTML 注释的收尾行（如 `-->` 单独成行）
+        return True
+    return bool(_LIST_LINE_RE.match(s))
+
+
+def _ends_sentence(s):
+    return bool(s) and s[-1] in _SENTENCE_END
+
+
+def _join_pair(a, b):
+    """合并两行：中文直接相连、英文（两侧都是 ASCII 字母数字）补一个空格。"""
+    a, b = a.rstrip(), b.lstrip()
+    if not a:
+        return b
+    if not b:
+        return a
+    if a[-1].isascii() and a[-1].isalnum() and b[0].isascii() and b[0].isalnum():
+        return a + ' ' + b
+    return a + b
+
+
+def join_wrapped_lines(text):
+    """把被硬换行拆开的普通段落连成一行（中文直接相连、英文间补一格空格）。
+
+    不合并的安全边界：空行两侧、标题(#)、列表(-/*/+/数字.)、表格行(|)、
+    引用(>)、代码围栏内、HTML 块（<div>/<table>/<!-- --> 等）、上一行以
+    中英文句末标点结尾。幂等：合并后是普通单行，二次调用不再变化。
+    """
+    if not text:
+        return text or ''
+    out, in_fence, in_comment = [], False, False
+    for raw in text.split('\n'):
+        s = raw.strip()
+        if s.startswith('```'):
+            in_fence = not in_fence
+            out.append(raw)
+            continue
+        if in_fence:
+            out.append(raw)
+            continue
+        if in_comment:
+            out.append(raw)
+            if '-->' in s:
+                in_comment = False
+            continue
+        head = s.split('<!--', 1)[1] if '<!--' in s else None
+        if head is not None and '-->' not in head:
+            out.append(raw)
+            in_comment = True
+            continue
+        if not s:
+            out.append('')
+            continue
+        if _is_block_line(s):
+            out.append(raw)
+            continue
+        if out:
+            prev = out[-1]
+            ps = prev.strip()
+            if ps and prev == ps and not _is_block_line(ps) \
+                    and not _ends_sentence(ps):
+                out[-1] = _join_pair(prev, s)
+                continue
+        out.append(raw)
+    return '\n'.join(out)
+
+
+_CJK_CLASS = '[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]'
+_CJK_LATIN_RE = re.compile('(?<=' + _CJK_CLASS + ')(?=[A-Za-z0-9])')
+_LATIN_CJK_RE = re.compile('(?<=[A-Za-z0-9])(?=' + _CJK_CLASS + ')')
+_PROTECT_INLINE_RE = re.compile(
+    r'`[^`\n]*`'                              # 行内 code
+    r'|!?\[[^\]\n]*\]\([^)\n]*\)'             # Markdown 图片/链接语法
+    r'|(?:https?://|www\.)[^\s<>)\]|]+'       # URL
+    r'|<[^>\n]{1,200}>'                       # HTML 标签
+)
+
+
+def _space_cjk_latin_chunk(chunk):
+    return _LATIN_CJK_RE.sub(' ', _CJK_LATIN_RE.sub(' ', chunk))
+
+
+def space_cjk_latin(text):
+    """在「汉字 ↔ 拉丁字母/数字」边界各插一个空格（已有的空格不动）。
+
+    跳过：代码围栏/行内 `code`、URL（http(s)://、www.）、HTML 标签、
+    markdown 表格行与 HTML 块行、图片/链接语法内部。幂等：插入后边界不再
+    相邻，二次调用无变化。
+    """
+    if not text:
+        return text or ''
+    out, in_fence = [], False
+    for raw in text.split('\n'):
+        s = raw.strip()
+        if s.startswith('```'):
+            in_fence = not in_fence
+            out.append(raw)
+            continue
+        if in_fence or s.startswith(('|', '<')):
+            out.append(raw)
+            continue
+        parts, pos = [], 0
+        for m in _PROTECT_INLINE_RE.finditer(raw):
+            parts.append(_space_cjk_latin_chunk(raw[pos:m.start()]))
+            parts.append(m.group(0))
+            pos = m.end()
+        parts.append(_space_cjk_latin_chunk(raw[pos:]))
+        out.append(''.join(parts))
+    return '\n'.join(out)
+
+
+_SEP_CELL_RE = re.compile(r'^:?-{1,}:?$')
+
+
+def _split_table_row(s):
+    body = s.strip()
+    if body.startswith('|'):
+        body = body[1:]
+    if body.endswith('|'):
+        body = body[:-1]
+    return body.split('|')
+
+
+def _is_sep_row(cells):
+    return bool(cells) and all(_SEP_CELL_RE.match(c.strip()) for c in cells)
+
+
+def _table_block_is_bad(rows):
+    """表格块内任一数据行列数 != 表头列数 → 1，否则 0（分隔行不计）。"""
+    cells = [_split_table_row(r) for r in rows]
+    sep = next((i for i, c in enumerate(cells) if _is_sep_row(c)), None)
+    if sep is not None:
+        header = cells[sep - 1] if sep > 0 else None
+        data = cells[sep + 1:]
+    else:
+        header, data = (cells[0] if cells else None), cells[1:]
+    if header is None or not data:
+        return 0
+    n = len(header)
+    return 1 if any(len(r) != n for r in data) else 0
+
+
+def check_tables(text):
+    """统计列数不一致的 markdown 表格块数量（只计数、不改写）。
+
+    表格块 = 连续以 `|` 开头的行；分隔行 `|---|` 不参与比对；
+    数据行列数 != 表头列数即记 1（每块最多记 1）。
+    """
+    if not text:
+        return 0
+    count, block = 0, []
+    for line in text.split('\n'):
+        if line.strip().startswith('|'):
+            block.append(line)
+            continue
+        if block:
+            count += _table_block_is_bad(block)
+            block = []
+    if block:
+        count += _table_block_is_bad(block)
+    return count
+
+
+def _finalize_text(md, join_lines=False, cjk_spacing=False, stats=None):
+    """layout→Markdown 之后的文本管线（两条入口共用，顺序固定）。
+
+    normalize_latex（始终）→ join_lines（开关）→ cjk_spacing（开关）
+    → check_tables（始终，只计数写 stats['tableWarnings']）。
+    drop_headers 在更早的 layout 渲染阶段处理（必须先于文本规整）。
+    """
+    text = normalize_latex(md)
+    if join_lines:
+        text = join_wrapped_lines(text)
+    if cjk_spacing:
+        text = space_cjk_latin(text)
+    if stats is not None:
+        stats['tableWarnings'] = check_tables(text)
+    return text
+
+
+def _convert_impl(result, drop_headers=False, stats=None,
+                  join_lines=False, cjk_spacing=False):
+    """convert() 的实现体：返回 Markdown 字符串，统计写进 stats。
+
+    对外契约不变：`convert(result, ...) -> str`；需要统计时用
+    `convert_with_stats()`。文本规整顺序见 _finalize_text()。
+    """
+    if stats is not None:
+        stats.setdefault('droppedBlocks', 0)
+        stats.setdefault('tableWarnings', 0)
     text = (result or '').strip()
     if text.startswith('```markdown'):
         text = text[len('```markdown'):].strip()
@@ -357,33 +623,50 @@ def _convert_impl(result, drop_headers=False, stats=None):
     text = re.sub(r'(?m)^\s*\[\s*-?\d+\s*,\s*-?\d+\s*,\s*-?\d+\s*,\s*-?\d+\s*\]\s*$', '', text)
     text = re.sub(r'[ \t]+\n', '\n', text)
     text = re.sub(r'\n{3,}', '\n\n', text).strip()
-    return '\n\n'.join(_single_root_titles(text.split('\n\n')))
+    md = '\n\n'.join(_single_root_titles(text.split('\n\n')))
+    return _finalize_text(md, join_lines, cjk_spacing, stats)
 
 
-def convert(result, drop_headers=False):
+def convert(result, drop_headers=False, join_lines=False, cjk_spacing=False):
     """Unlimited-OCR 2 raw document string → Markdown（移植自上游 convert()）。
 
     契约不变：`convert(str) -> str`。drop_headers=True 时额外丢弃
-    header/footer/page_number（E11），返回值仍是纯 Markdown 字符串。
+    header/footer/page_number（E11）；join_lines=True 去掉硬换行（E12）；
+    cjk_spacing=True 在汉字与拉丁/数字间补空格（E12）。
+    LaTeX 定界符归一（E13）始终执行；表格列数校验只计数，不在此返回。
     """
-    return _convert_impl(result, drop_headers)
+    return _convert_impl(result, drop_headers, None, join_lines, cjk_spacing)
 
 
-def convert_with_stats(result, drop_headers=False):
-    """convert() 的带统计变体：返回 (markdown, {"droppedBlocks": n})。"""
-    stats = {'droppedBlocks': 0}
-    return _convert_impl(result, drop_headers, stats), stats
+def convert_with_stats(result, drop_headers=False, join_lines=False,
+                       cjk_spacing=False):
+    """convert() 的带统计变体：返回 (markdown, stats)。
+
+    stats 至少含：droppedBlocks（E11 丢弃块数）、tableWarnings（E14 列数不符
+    的表格块数）。
+    """
+    stats = {'droppedBlocks': 0, 'tableWarnings': 0}
+    md = _convert_impl(result, drop_headers, stats, join_lines, cjk_spacing)
+    return md, stats
 
 
-def to_gui_markdown(raw: str, drop_headers=False) -> str:
+def to_gui_markdown(raw: str, drop_headers=False, join_lines=False,
+                    cjk_spacing=False) -> str:
     """convert() + GUI 适配：图片占位 → 斜体区域说明（本工具不落盘裁剪图）。"""
-    return to_gui_markdown_with_stats(raw, drop_headers)[0]
+    return to_gui_markdown_with_stats(raw, drop_headers, join_lines,
+                                      cjk_spacing)[0]
 
 
-def to_gui_markdown_with_stats(raw: str, drop_headers=False):
-    """to_gui_markdown() 的带统计变体：返回 (markdown, {"droppedBlocks": n})。"""
-    stats = {'droppedBlocks': 0}
-    md = _convert_impl(raw, drop_headers, stats)
+def to_gui_markdown_with_stats(raw: str, drop_headers=False, join_lines=False,
+                               cjk_spacing=False):
+    """to_gui_markdown() 的带统计变体：返回 (markdown, stats)。
+
+    管线：layout 块→Markdown（drop_headers 在此生效）→ normalize_latex（始终）
+    → join_lines（开关）→ cjk_spacing（开关）→ check_tables（始终，仅计数）
+    → GUI 图片占位替换。stats 含 droppedBlocks / tableWarnings。
+    """
+    stats = {'droppedBlocks': 0, 'tableWarnings': 0}
+    md = _convert_impl(raw, drop_headers, stats, join_lines, cjk_spacing)
 
     def _img_repl(m):
         page, x1, y1, x2, y2 = m.groups()

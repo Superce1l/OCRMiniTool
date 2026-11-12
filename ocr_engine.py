@@ -20,6 +20,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import os
 import re
 import sys
@@ -30,10 +31,37 @@ from pathlib import Path
 from downloader import RUNTIME_DIR, installed_torch_info, quick_check
 from i18n import tr
 from ocr_postprocess import PAGE_SPLIT_RE, to_gui_markdown_with_stats
+from page_range import parse_pages as _parse_page_spec
 
 DEFAULT_PROMPT = "Multi page parsing."   # 上游 vLLM 部署的默认指令
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+
+
+def _render_with_stats(raw_text: str, *, drop_headers: bool,
+                       join_lines: bool, cjk_spacing: bool):
+    """调后处理并返回 (markdown, droppedBlocks, tableWarnings)。
+
+    后处理（ocr_postprocess）由另一路同事加 `join_lines` / `cjk_spacing` 两个
+    kwarg 与 `stats["tableWarnings"]`。这里用签名探测**只传它认识的参数**，
+    因此任一侧先落地都不炸：对方没落地时两个开关被静默忽略、tableWarnings
+    按 0 返回（GUI 侧仍能拿到该字段，语义为"没有告警"）。
+    """
+    extra = {"join_lines": bool(join_lines), "cjk_spacing": bool(cjk_spacing)}
+    kwargs = {"drop_headers": bool(drop_headers)}
+    try:
+        params = inspect.signature(to_gui_markdown_with_stats).parameters
+        names = set(params)
+        has_var_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD
+                         for p in params.values())
+    except (TypeError, ValueError):        # 探测失败：只传最老的安全参数
+        names, has_var_kw = set(), False
+    for key, value in extra.items():
+        if has_var_kw or key in names:
+            kwargs[key] = value
+    md, stats = to_gui_markdown_with_stats(raw_text, **kwargs)
+    return (md, int(stats.get("droppedBlocks", 0) or 0),
+            int(stats.get("tableWarnings", 0) or 0))
 
 
 def _setup_hf_cache(cache_root: Path):
@@ -917,7 +945,8 @@ class OcrEngine:
     # ── PDF → 页图 ───────────────────────────────────────────
     @staticmethod
     def pdf_to_images(pdf_path: str | Path, dpi: int = 200,
-                      out_dir: Path | None = None) -> list[Path]:
+                      out_dir: Path | None = None,
+                      page_range: str = "") -> list[Path]:
         """PDF 逐页转 PNG（pymupdf）。缺库时抛带指引的 EngineError。
 
         dpi: 光栅化分辨率，默认 200（recognize 传入前会经 _normalize_dpi
@@ -925,6 +954,10 @@ class OcrEngine:
         已覆盖模型 gundam 1×2 tile（1280 px 高）所需；更高 dpi 只增加转图
         时间与临时盘，不带来额外版面细节（模型会把页面缩到 640/1024 网格）。
         out_dir: 输出目录（默认为 PDF 同目录）。临时目录由 recognize 创建并清理。
+        page_range: 只导出选中页（"1-3,5,10-"；空 = 全部页）。语法非法 →
+          EngineError(tr("err.badPageRange"))；越界页号按"夹取后去重"处理
+          （与 CLI --pages 同一份 page_range 实现）。输出文件名保留**原页号**
+          （`_ocr_page_<stem>_0007.png`），调用方据此知道页的来源。
         """
         try:
             import fitz   # pymupdf
@@ -934,15 +967,47 @@ class OcrEngine:
         out_dir = Path(out_dir or pdf_path.parent)
         doc = fitz.open(str(pdf_path))
         try:
+            total = int(getattr(doc, "page_count", 0) or 0)
+            spec = str(page_range or "").strip()
+            if spec:
+                try:
+                    numbers = _parse_page_spec(spec, total)
+                except ValueError as e:
+                    raise EngineError(
+                        tr("err.badPageRange", spec=spec)) from e
+            else:
+                numbers = list(range(1, total + 1))
             mat = fitz.Matrix(dpi / 72, dpi / 72)
             pages = []
-            for i, page in enumerate(doc):
-                p = out_dir / f"_ocr_page_{pdf_path.stem}_{i + 1:04d}.png"
-                page.get_pixmap(matrix=mat).save(str(p))
+            for n in numbers:
+                if n < 1 or n > total:
+                    continue
+                p = out_dir / f"_ocr_page_{pdf_path.stem}_{n:04d}.png"
+                doc[n - 1].get_pixmap(matrix=mat).save(str(p))
                 pages.append(p)
             return pages
         finally:
             doc.close()
+
+    def _pdf_to_images_compat(self, pdf_path, *, out_dir, dpi, page_range) -> list[Path]:
+        """调 `pdf_to_images`，兼容尚未支持 page_range 的实现/测试桩。
+
+        只在 page_range 非空时才尝试传该关键字：签名里有 page_range（或
+        **kwargs）才传，否则按旧调用（只 out_dir/dpi）——保证旧桩不炸。
+        """
+        kwargs = {"out_dir": out_dir, "dpi": dpi}
+        spec = str(page_range or "").strip()
+        if spec:
+            try:
+                params = inspect.signature(self.pdf_to_images).parameters
+                names = set(params)
+                has_var_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD
+                                 for p in params.values())
+            except (TypeError, ValueError):
+                names, has_var_kw = set(), False
+            if has_var_kw or "page_range" in names:
+                kwargs["page_range"] = spec
+        return self.pdf_to_images(pdf_path, **kwargs)
 
     # ── 识别 ─────────────────────────────────────────────────
     def recognize(self, image_paths: list[Path], prompt: str = "",
@@ -950,7 +1015,9 @@ class OcrEngine:
                   max_new_tokens: int | None = None,
                   crop_mode=None, max_page_tokens: int = 0,
                   max_merged_pages: int = 0, drop_headers: bool = False,
-                  dpi: int | None = None) -> dict:
+                  dpi: int | None = None,
+                  page_range: str = "", join_lines: bool = False,
+                  cjk_spacing: bool = False) -> dict:
         """识别图片（可多页）。返回 {text, pages: [str], elapsed, ...}。
 
         image_paths: 一或多张图片路径（按页序）。
@@ -968,6 +1035,13 @@ class OcrEngine:
           多页 → base。多页请求 gundam 会降级为 base（上游只验证过单图切片）。
         drop_headers: True 时后处理丢弃 header/footer/page_number 三类版面块（E11）。
         dpi: PDF 逐页光栅化分辨率；None/非法 → 200（旧行为不变），仅对 .pdf 生效。
+        page_range: PDF 页范围（"1-3,5,10-"；空 = 全部页）。非 PDF 输入忽略；
+          语法非法 → EngineError(err.badPageRange)。**只导出选中页**，因此
+          后的分组/上限都按选中页计算。
+        join_lines: 后处理把被硬换行拆开的同段文本接回去（E12）。
+        cjk_spacing: 后处理给中英文/数字之间补空格（E14）。
+          两者与 tableWarnings 由 ocr_postprocess 提供；尚未落地时被静默忽略
+          （见 _render_with_stats 的签名兼容）。
 
         merged（默认）：尽量一次请求合并多页（跨页上下文，<PAGE> 分隔输出）；
         仅当页数超过 max_merged_pages 时才分组。
@@ -981,6 +1055,7 @@ class OcrEngine:
           infer           最后一组的度量明细（prefill/decode 秒、tokens/s 等）
           groups          实际分组数（未分组=1）
           droppedBlocks   被 drop_headers 丢弃的版面块数
+          tableWarnings   后处理发现的表格问题数（各组之和；E12/E14 同批）
           effectiveMaxNewTokens 本次请求实际用的生成上限（None=模型默认）
         """
         if not self.ready:
@@ -993,6 +1068,9 @@ class OcrEngine:
         merge_limit = _normalize_merged_pages(max_merged_pages)   # A3
         explicit_new = _normalize_explicit_max_new_tokens(max_new_tokens)
         want_drop = bool(drop_headers)                            # E11
+        want_join = bool(join_lines)                              # E12
+        want_cjk = bool(cjk_spacing)                              # E14
+        page_spec = str(page_range or "").strip()
 
         cancel_event = cancel_event or self.cancel_event
         t0 = time.time()
@@ -1000,6 +1078,7 @@ class OcrEngine:
         stats: dict = {}
         group_stats: list[dict] = []
         dropped_total = 0
+        table_warnings_total = 0
         total_groups = 1
         effective_new = None
         # 流式钩子：识别期间 on_finalized_text 会累计字数并检查取消
@@ -1016,8 +1095,9 @@ class OcrEngine:
                     if p.suffix.lower() == ".pdf":
                         tmp_dir = Path(_tempfile.mkdtemp(prefix="ocr_pdf_"))
                         tmp_dirs.append(str(tmp_dir))
-                        expanded.extend(self.pdf_to_images(
-                            p, out_dir=tmp_dir, dpi=pdf_dpi))
+                        expanded.extend(self._pdf_to_images_compat(
+                            p, out_dir=tmp_dir, dpi=pdf_dpi,
+                            page_range=page_spec))
                     else:
                         expanded.append(p)
                 if not expanded:
@@ -1042,6 +1122,10 @@ class OcrEngine:
                     page_tokens, group_size, explicit_new)
                 _log_plan(n_pages, total_groups, group_size, resolved_crop,
                           page_tokens, effective_new, want_drop)
+                if page_spec or want_join or want_cjk:
+                    _log_ocr_safe(
+                        f"页范围/后处理：page_range={page_spec or '全部'} "
+                        f"join_lines={want_join} cjk_spacing={want_cjk}")
 
                 if progress_cb:
                     stage = (tr("eng.stageGundam") if n_pages == 1
@@ -1049,10 +1133,13 @@ class OcrEngine:
                     progress_cb(stage, 0, total_groups, 0.0)
 
                 def _render(raw_text: str):
-                    """单页原始输出 → (GUI Markdown, 丢弃块数)。"""
-                    md, st = to_gui_markdown_with_stats(
-                        raw_text, drop_headers=want_drop)
-                    return md, int(st.get("droppedBlocks", 0) or 0)
+                    """单页原始输出 → (GUI Markdown, 丢弃块数)；表格告警累加。"""
+                    nonlocal table_warnings_total
+                    md, dropped, warns = _render_with_stats(
+                        raw_text, drop_headers=want_drop,
+                        join_lines=want_join, cjk_spacing=want_cjk)
+                    table_warnings_total += warns
+                    return md, dropped
 
                 groups_done = 0
                 for group in page_groups:
@@ -1086,6 +1173,9 @@ class OcrEngine:
                 if want_drop:
                     _log_ocr_safe(
                         f"页眉页脚丢弃：{dropped_total} 块（drop_headers=True）")
+                if table_warnings_total:
+                    _log_ocr_safe(
+                        f"表格告警：{table_warnings_total} 处（tableWarnings）")
             finally:
                 for d in tmp_dirs:
                     try:
@@ -1117,6 +1207,8 @@ class OcrEngine:
             "groups": total_groups,
             "droppedBlocks": dropped_total,
             "effectiveMaxNewTokens": effective_new,
+            # E12 / E14：后处理（join_lines / cjk_spacing）发现的表格问题总数
+            "tableWarnings": table_warnings_total,
         }
 
     def _infer(self, images: list[Path], prompt: str, crop_mode=None,

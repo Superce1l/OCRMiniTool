@@ -61,7 +61,7 @@ python）。不要 `cd` 到别的目录再调用相对路径的 `cli.py`——�
 | `--max-merged-pages N` | 每次请求最多合并多少页。引擎支持时透传；否则 CLI 侧按 N 页分块 |
 | `--crop-mode auto\|gundam\|base` | 切片策略。**缺省=沿用引擎旧行为**（单页 gundam、多页 base）；显式 `auto`=按长宽比自动（长截图 h/w>3 → base，其余 gundam）；`gundam`/`base`=强制 |
 | `--drop-headers` | 丢弃页眉/页脚/页码块。**引擎支持时透传，否则告警忽略**（见 §5） |
-| `--pages "1-3,5,10-"` | 仅对 PDF 生效的页范围（1-based；`10-` 表示到末页） |
+| `--pages "1-3,5,10-"` | 仅对 PDF 生效的页范围（1-based；`10-` 表示到末页）。与 GUI 设置 `pdfPageRange` 同一份解析实现，但**只作用于本次运行**（见 §5.1） |
 | `--json` | stdout 只输出一个 JSON 对象（进度/告警一律走 stderr） |
 | `--quiet` | 抑制进度行与逐文件成功行（错误仍然打印） |
 | `--verbose` | 失败时打印 traceback（默认只给一行人话错误） |
@@ -171,6 +171,31 @@ CLI 用 `inspect.signature(engine.recognize)` **探测参数名**，因此既吃
 > 历史坑：`crop_mode` 在模型源码里最终是 `bool`（`bool(crop_mode)`），旧调用层
 > 曾直接传 `True/False`。引擎已收敛为「`None` / 字符串」口径；CLI 只传字符串或
 > 不传，**不再产生 bool**。
+
+### 5.1 GUI 设置项与 CLI 的差异（含本轮新增的页范围 / 后处理开关）
+
+GUI（设置页）把识别参数**持久化**在 `settings.json`，每次识别自动带上；CLI 的
+对应能力**只作用于本次运行**，且部分开关 CLI 尚未提供（下表「CLI 对应」为 `—`
+的项就是本轮**没有** CLI 开关的）。
+
+| `settings.json` 键 | GUI 行为 | CLI 对应 | 说明 |
+|---|---|---|---|
+| `pdfPageRange`（默认 `""`） | 设置页填「PDF 页范围」，识别时按设置值透传给引擎（**只对 PDF 生效**，非 PDF 忽略） | `--pages "1-3,5,10-"` | 语法完全一致（同一份 `page_range.parse_pages`）。差别：GUI 是**持久设置**、CLI 是**单次参数**；GUI 的 A9 护栏（150 页上限）会**按选中页数**计算，CLI 侧没有该护栏（`--pages` 在本地筛页后再提交） |
+| `joinLines`（默认 `false`） | 后处理把被硬换行拆开的同段文本接回去 | — | **本轮 CLI 无开关**：CLI 输出不做该后处理（需要的话在 GUI 里设，或后续给 CLI 加 `--join-lines`） |
+| `cjkSpacing`（默认 `false`） | 后处理在中英文/数字之间补空格 | — | **本轮 CLI 无开关**，同上 |
+| `dropHeaders`（默认 `false`） | 丢弃页眉/页脚/页码块 | `--drop-headers` | 两边都有；旧引擎不支持时 CLI 告警忽略 |
+| `maxPageTokens`（默认 `4096`） | 单页输出 token 上限（0=不限） | `--max-page-tokens N` | 取值语义一致 |
+| `maxMergedPages`（默认 `20`） | 合并请求的页数上限（0=不限） | `--max-merged-pages N` | 旧引擎上 CLI 自己分块（见上表） |
+| `cropMode`（默认 `auto`） | 切片策略 | `--crop-mode auto\|gundam\|base` | 两边都透传字符串；CLI 不给则该 kwarg 不传 |
+
+`page_range.parse_pages` 的语义（GUI 与 CLI 完全一致）：
+1-based、逗号分隔的单页/闭区间/开区间，**越界夹取**并**升序去重**
+（5 页 PDF 上 `1-3,5` → `[1,2,3]`；`10-` → `[5]`）；空串 = 不筛选。
+GUI 里非法值会被设置页拒绝且**不写盘**（`err.badValue`）；CLI 里非法值直接是
+参数错误（退出码 1，`CliError`）。
+
+> `tableWarnings`（后处理发现的表格问题数）目前只透传到 **GUI 的识别响应与批量
+> item**；CLI 的 `md/txt/json` 输出本轮**不含**该字段（CLI 未透传，后续需要再加）。
 
 ---
 

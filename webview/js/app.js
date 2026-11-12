@@ -385,6 +385,36 @@ document.addEventListener("drop", e => {
   flash(t("msg.dropOutside"));
 });
 
+/* ── E6 剪贴板粘贴图片（Ctrl+V）────────────────────────────
+   只在非输入区拦截：提示词、结果编辑框里粘贴文本必须走浏览器默认行为。
+   这里只处理剪贴板里的 image/*；纯文本/其它内容不拦、也不报错。 */
+document.addEventListener("paste", e => {
+  if (isTextEntry(e.target) || isTextEntry(document.activeElement)) return;
+  const items = [...((e.clipboardData && e.clipboardData.items) || [])];
+  const hasText = items.some(it => it.kind === "string");
+  const files = [];
+  for (const it of items) {
+    if (it.kind !== "file" || !String(it.type || "").startsWith("image/")) continue;
+    let raw = null;
+    try { raw = it.getAsFile ? it.getAsFile() : null; } catch { raw = null; }
+    if (!raw) continue;
+    const ext = (String(it.type).split("/")[1] || "png").replace(/^jpeg$/, "jpg");
+    files.push(new File([raw], `pasted-${files.length + 1}.${ext}`,
+                        { type: it.type, lastModified: Date.now() }));
+  }
+  if (!files.length) {
+    // 剪贴板里既没有图片也没有文本（例如复制的是文件/快捷方式）才提示
+    if (!hasText) flash(t("msg.pastedNone"));
+    return;
+  }
+  e.preventDefault();
+  if (state.running) { flash(t("msg.runningLocked")); return; }
+  const before = state.files.length;
+  addFiles(files);
+  const added = state.files.length - before;
+  if (added > 0) flash(t("msg.pasted", { n: added }));
+});
+
 /* F7：同一文件重复拖入/重复选择会重复识别、重复占页序，按「名 | 大小 | 修改时间」去重。
    lastModified 让同名但内容不同的文件仍能加入；老 File 对象没有该字段时退回 0。 */
 function fileKey(f) {
@@ -504,7 +534,9 @@ async function pickDirectory() {
   }
   if (state.files.length) flash(t("msg.mixedSources"));
 }
-$("#btn-pick-dir").addEventListener("click", pickDirectory);
+$("#btn-pick-dir").addEventListener("click", () => {
+  pickDirectory().catch(e => flashError(t("msg.genericFailed", { err: e.message || e })));
+});
 
 /* ── 识别模式 ─────────────────────────────────────────── */
 $("#ocr-mode").addEventListener("click", e => {
@@ -518,9 +550,57 @@ $("#ocr-mode").addEventListener("click", e => {
 /* ── 识别 ─────────────────────────────────────────────── */
 $("#btn-run").addEventListener("click", runOcr);
 $("#btn-cancel").addEventListener("click", async () => {
-  await API.cancel();
-  flash(t("msg.cancelRequested"));
+  try {
+    await API.cancel();
+    flash(t("msg.cancelRequested"));
+  } catch (e) {
+    flashError(t("msg.genericFailed", { err: e.message || e }));
+  }
 });
+
+/* ── B13 键盘可达性 / F12 无障碍 ────────────────────────────
+   最小键盘集：Ctrl/Cmd+Enter 开始识别、Esc 取消（仅运行中）。
+   #drop / #model-status 保持 div（不改标签，避免 CSS 与既有测试回归），
+   用 role=button + tabindex 让它可聚焦，Enter/Space 等价点击。 */
+function isTextEntry(el) {
+  if (!el) return false;
+  const tag = String(el.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") return true;
+  return !!el.isContentEditable;
+}
+function activateOnKey(el, fn) {
+  if (!el) return;
+  el.addEventListener("keydown", e => {
+    if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+    // 子控件（#btn-pick / #btn-pick-dir 等）自己处理键盘激活，别再抢一次
+    if (e.target !== el && e.target.closest("button, a, input, select, textarea")) return;
+    e.preventDefault();
+    fn(e);
+  });
+}
+document.addEventListener("keydown", e => {
+  // Ctrl/Cmd+Enter：输入框里也生效（提示词在发起识别时才读取）
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+    if (state.running) return;
+    const btn = $("#btn-run");
+    if (!btn || btn.disabled) return;
+    e.preventDefault();
+    runOcr();
+    return;
+  }
+  // Esc：只在识别/模型任务运行时取消，空闲时不吞按键
+  if (e.key === "Escape" && state.running) {
+    e.preventDefault();
+    API.cancel()
+      .then(() => flash(t("msg.cancelRequested")))
+      .catch(() => flash(t("msg.genericFailed", { err: "cancel" })));
+  }
+});
+activateOnKey($("#drop"), () => {
+  if (state.running) { flash(t("msg.runningLocked")); return; }
+  hiddenFile.click();
+});
+activateOnKey($("#model-status"), () => switchView("model"));
 
 async function runOcr() {
   if (state.running) return;
@@ -535,7 +615,7 @@ async function runOcr() {
   hideAlert();                       // 新一轮识别开始：上一轮的报错横幅先收起
   renderRunButtons();
   $("#progress").hidden = false;
-  setProgress(2, paths.length ? t("prog.reading") : t("prog.uploading"));
+  setProgress(0.02, paths.length ? t("prog.reading") : t("prog.uploading"));
   const prompt = $("#prompt-box").value.trim();
   try {
     const result = await API.recognize({
@@ -583,6 +663,8 @@ function setProgress(pct, status) {
   const p = Math.max(0, Math.min(100, Math.round((pct || 0) * 100)));
   $("#prog-bar").style.width = p + "%";
   $("#prog-pct").textContent = p + "%";
+  // F12：进度条对读屏有语义（role=progressbar 在 index.html，值在这里同步）
+  $("#progress").setAttribute("aria-valuenow", String(p));
   if (status != null) $("#prog-status").textContent = status;
 }
 
@@ -598,7 +680,10 @@ function truncationInfo(r) {
   if (!r || typeof r !== "object") return null;
   const truncated = !!r.truncated;
   const mismatch = !!r.pagesMismatch;
-  if (!truncated && !mismatch) return null;
+  // E14：后处理发现的表格列数不一致（后端 tableWarnings），与截断提示共用一条横幅
+  const tableWarnings = numOrNull(
+    r.tableWarnings != null ? r.tableWarnings : r.table_warnings) || 0;
+  if (!truncated && !mismatch && !(tableWarnings > 0)) return null;
   const expected = numOrNull(r.expectedPages != null ? r.expectedPages : r.expected_pages);
   const actualRaw = numOrNull(r.actualPages != null ? r.actualPages : r.actual_pages);
   const actual = actualRaw != null ? actualRaw
@@ -606,6 +691,7 @@ function truncationInfo(r) {
   return {
     truncated,
     mismatch,
+    tableWarnings,
     finish: r.finishReason || r.finish_reason || "",
     groups: numOrNull(r.groups),
     dropped: numOrNull(r.droppedBlocks != null ? r.droppedBlocks : r.dropped_blocks),
@@ -628,14 +714,22 @@ function resultWarnLines(r) {
   }
   if (info.groups != null && info.groups > 1) lines.push(t("warn.groups", { n: info.groups }));
   if (info.dropped != null && info.dropped > 0) lines.push(t("warn.droppedBlocks", { n: info.dropped }));
-  lines.push(t("warn.retryHint"));
+  if (info.tableWarnings > 0) lines.push(t("result.tableWarn", { n: info.tableWarnings }));
+  // 「调大单页上限/调小合并页数」只对截断/页数不符有意义；表格提示不需要这条
+  if (info.truncated || info.mismatch) lines.push(t("warn.retryHint"));
   return lines;
 }
 function batchWarnLines(result) {
   const items = (result && result.items) || [];
   const n = items.filter(it => it && (it.truncated || it.pagesMismatch)).length;
-  if (!n) return [];
-  return [t("warn.batchTruncated", { n }), t("warn.retryHint")];
+  const tableN = items.reduce((acc, it) =>
+    acc + ((it && numOrNull(it.tableWarnings != null
+      ? it.tableWarnings : it.table_warnings)) || 0), 0);
+  const lines = [];
+  if (n) lines.push(t("warn.batchTruncated", { n }));
+  if (tableN > 0) lines.push(t("result.tableWarn", { n: tableN }));
+  if (n) lines.push(t("warn.retryHint"));
+  return lines;
 }
 function renderResultWarn(lines) {
   const box = $("#result-warn");
@@ -655,7 +749,11 @@ function logResultWarnings(result) {
   if (result.mode === "batch") {
     const items = result.items || [];
     const n = items.filter(it => it && (it.truncated || it.pagesMismatch)).length;
+    const tableN = items.reduce((acc, it) =>
+      acc + ((it && numOrNull(it.tableWarnings != null
+        ? it.tableWarnings : it.table_warnings)) || 0), 0);
     if (n) flash(t("warn.batchTruncated", { n }));
+    if (tableN > 0) flash(t("result.tableWarn", { n: tableN }));
     return;
   }
   const info = truncationInfo(result);
@@ -667,6 +765,7 @@ function logResultWarnings(result) {
       ? t("warn.logPagesMismatch", { expected: info.expected, actual: info.actual })
       : t("warn.pagesMismatchUnknown"));
   }
+  if (info.tableWarnings > 0) bits.push(t("result.tableWarn", { n: info.tableWarnings }));
   flash(bits.join(" · "));
 }
 
@@ -1020,7 +1119,7 @@ async function retryFailedItems() {
   renderRunButtons();
   $("#btn-retry-failed").disabled = true;
   $("#progress").hidden = false;
-  setProgress(2, t("msg.retrying", { n: targets.length }));
+  setProgress(0.02, t("msg.retrying", { n: targets.length }));
   try {
     const result = await API.recognize({
       files, paths, prompt: $("#prompt-box").value.trim(), mode: "batch",
@@ -1113,12 +1212,19 @@ $("#btn-save").addEventListener("click", () => {
     flashError(t("msg.genericFailed", { err: e.message || e }));
   }
 });
-$("#btn-open-dir").addEventListener("click", () => API.openOutputDir());
+$("#btn-open-dir").addEventListener("click", () => {
+  API.openOutputDir().catch(e => flashError(t("msg.genericFailed", { err: e.message || e })));
+});
 
 /* ── 最近识别 ─────────────────────────────────────────── */
 async function refreshHistory() {
-  // bridge 失败时返回 {items:[], error}，这里必须兜底（旧实现直接解构会 TypeError）
-  const r = await API.listHistory();
+  // bridge 失败时会返回 {items:[], error}；这里再兜一层，任何异常都不许冒泡
+  let r = null;
+  try {
+    r = await API.listHistory();
+  } catch (e) {
+    console.warn("[OCRApi] listHistory failed", e);
+  }
   const items = (r && r.items) || [];
   const head = $("#history-head"), list = $("#history-list");
   if (!items.length) { head.hidden = true; list.hidden = true; return; }
@@ -1135,32 +1241,54 @@ async function refreshHistory() {
     </button>`;
   }).join("");
 }
+/* B13：历史删除被抽成函数，鼠标点击与键盘 Enter/Space 共用同一逻辑 */
+async function deleteHistoryItem(name) {
+  if (!name) return;
+  if (!confirm(t("msg.confirmDelete", { name }))) return;
+  try {
+    const r = await API.deleteHistory(name);
+    if (r && !r.ok) flashError(t("msg.genericFailed", { err: r.error || "history-delete" }));
+  } catch (e) {
+    flashError(t("msg.genericFailed", { err: e.message || e }));
+  }
+  refreshHistory();
+}
 $("#history-list").addEventListener("click", async e => {
   const del = e.target.closest(".hx");
   if (del) {
     e.stopPropagation();
-    const name = del.dataset.del;
-    if (!confirm(t("msg.confirmDelete", { name }))) return;
-    const r = await API.deleteHistory(name);
-    if (r && !r.ok) flash(t("msg.genericFailed", { err: r.error || "history-delete" }));
-    refreshHistory();
+    await deleteHistoryItem(del.dataset.del);
     return;
   }
   const item = e.target.closest(".history-item");
   if (!item) return;
-  const r = await API.readHistory(item.dataset.name);
-  if (r && r.ok) {
-    // 历史文件没有「页/耗时」概念：elapsed=null，元信息显示字数 + 历史文件
-    // 同时清掉批量态，否则语言切换/重渲染会把旧批量列表又画回来
-    state.batchItems = null;
-    state.lastBatchResult = null;
-    state.lastResult = { text: r.text, pages: [r.text], outPath: r.name, elapsed: null };
-    state.curPage = 0;
-    showResult(state.lastResult);
-    flash(t("msg.loadedHistory", { name: r.name }));
-  } else {
-    flash(t("msg.genericFailed", { err: (r && r.error) || "history-read" }));
+  try {
+    const r = await API.readHistory(item.dataset.name);
+    if (r && r.ok) {
+      // 历史文件没有「页/耗时」概念：elapsed=null，元信息显示字数 + 历史文件
+      // 同时清掉批量态，否则语言切换/重渲染会把旧批量列表又画回来
+      state.batchItems = null;
+      state.lastBatchResult = null;
+      state.lastResult = { text: r.text, pages: [r.text], outPath: r.name, elapsed: null };
+      state.curPage = 0;
+      showResult(state.lastResult);
+      flash(t("msg.loadedHistory", { name: r.name }));
+    } else {
+      flashError(t("msg.genericFailed", { err: (r && r.error) || "history-read" }));
+    }
+  } catch (e) {
+    flashError(t("msg.genericFailed", { err: e.message || e }));
   }
+});
+/* B13：键盘删除历史（.hx 有 tabindex=0；Enter/Space 与点击同一逻辑，
+   必须阻止冒泡与默认行为，否则父级 button 会被「激活」去打开该历史文件） */
+$("#history-list").addEventListener("keydown", e => {
+  const del = e.target.closest(".hx");
+  if (!del) return;
+  if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+  e.preventDefault();
+  e.stopPropagation();
+  deleteHistoryItem(del.dataset.del);
 });
 
 /* ── 模型页 ───────────────────────────────────────────── */
@@ -1274,7 +1402,7 @@ $("#btn-model-download").addEventListener("click", async () => {
 });
 $("#btn-model-load").addEventListener("click", async () => {
   $("#model-progress").hidden = false;
-  setModelProgress(5, t("model.startLoad"));
+  setModelProgress(0.05, t("model.startLoad"));
   $("#btn-model-cancel").hidden = false;
   $("#btn-model-cancel").disabled = false;
   try {
@@ -1292,14 +1420,19 @@ $("#btn-model-load").addEventListener("click", async () => {
 });
 // 取消模型下载/加载：复用既有 /api/cancel（B5）
 $("#btn-model-cancel").addEventListener("click", async () => {
-  const ok = await API.cancel();
-  flash(ok ? t("msg.cancelRequested") : t("msg.genericFailed", { err: "cancel" }));
+  try {
+    const ok = await API.cancel();
+    flash(ok ? t("msg.cancelRequested") : t("msg.genericFailed", { err: "cancel" }));
+  } catch (e) {
+    flashError(t("msg.genericFailed", { err: e.message || e }));
+  }
 });
 
 function setModelProgress(pct, status) {
   const p = Math.max(0, Math.min(100, Math.round((pct || 0) * 100)));
   $("#model-prog-bar").style.width = p + "%";
   $("#model-prog-pct").textContent = p + "%";
+  $("#model-progress").setAttribute("aria-valuenow", String(p));
   if (status != null) $("#model-prog-status").textContent = status;
 }
 
@@ -1387,11 +1520,14 @@ $("#btn-flavor-download").addEventListener("click", async () => {
     $("#flavor-progress").hidden = true;
   }
 });
-$("#btn-flavor-cancel").addEventListener("click", () => API.cancelEnvDownload());
+$("#btn-flavor-cancel").addEventListener("click", () => {
+  API.cancelEnvDownload().catch(e => flashError(t("msg.genericFailed", { err: e.message || e })));
+});
 
 function setFlavorProgress(pct, status) {
   const p = Math.max(0, Math.min(100, Math.round((pct || 0) * 100)));
   $("#flavor-bar").style.width = p + "%";
+  $("#flavor-progress").setAttribute("aria-valuenow", String(p));
   if (status != null) $("#flavor-status").textContent = p + "% · " + status;
 }
 API.on("env-progress", ({ pct, status }) => {
@@ -1454,6 +1590,18 @@ function setIntSetting(s, key, sel) {
     el.value = String(spec.def);
   }
 }
+/* E7/E12：文本与布尔设置的回填。后端尚未返回该键时**不覆盖**用户输入，
+   避免并行开发/旧后端下输入的值被一次无关保存清空。 */
+function setTextSetting(s, key, sel) {
+  const el = $(sel);
+  if (Object.prototype.hasOwnProperty.call(s, key) && s[key] != null) {
+    el.value = String(s[key]);
+  }
+}
+function setBoolSetting(s, key, sel) {
+  const el = $(sel);
+  if (typeof s[key] === "boolean") el.checked = s[key];
+}
 function fillSettings(s) {
   // 后端校验失败时返回 {ok:false,error}：不能当成设置对象把界面清空
   if (!s || s.ok === false) return;
@@ -1472,6 +1620,10 @@ function fillSettings(s) {
   const crop = typeof s.cropMode === "string" ? s.cropMode : "auto";
   $$("#set-crop-mode button").forEach(b => b.classList.toggle("on", b.dataset.v === crop));
   if (typeof s.dropHeaders === "boolean") $("#set-drop-headers").checked = s.dropHeaders;
+  // 第二批（E7/E12）：PDF 页范围 + 两个后处理开关
+  setTextSetting(s, "pdfPageRange", "#set-pdf-pages");
+  setBoolSetting(s, "joinLines", "#set-join-lines");
+  setBoolSetting(s, "cjkSpacing", "#set-cjk-spacing");
   renderPythonSettings(s);
   applyTheme(s.theme || "light");
   applyScale(s.scale || 100);
@@ -1506,9 +1658,13 @@ async function flushSettings() {
 }
 $("#set-model-dir").addEventListener("change", () => pushSettings({ modelDir: $("#set-model-dir").value.trim() }));
 $("#btn-model-dir-browse").addEventListener("click", async () => {
-  const r = await API.browseFolder($("#set-model-dir").value);
-  if (r && r.ok && r.path) { $("#set-model-dir").value = r.path; pushSettings({ modelDir: r.path }); }
-  else if (r && r.error) flash(t("msg.genericFailed", { err: r.error }));
+  try {
+    const r = await API.browseFolder($("#set-model-dir").value);
+    if (r && r.ok && r.path) { $("#set-model-dir").value = r.path; pushSettings({ modelDir: r.path }); }
+    else if (r && r.error) flashError(t("msg.genericFailed", { err: r.error }));
+  } catch (e) {
+    flashError(t("msg.genericFailed", { err: e.message || e }));
+  }
 });
 $("#set-mirror").addEventListener("change", () => pushSettings({ mirror: $("#set-mirror").value.trim() }));
 $("#set-outfmt").addEventListener("click", e => {
@@ -1545,6 +1701,30 @@ $("#set-crop-mode").addEventListener("click", e => {
 });
 $("#set-drop-headers").addEventListener("change", () => {
   pushSettings({ dropHeaders: $("#set-drop-headers").checked });
+});
+
+/* E7：PDF 页范围是「语法字符串」，边打字边发会反复触发后端校验错误。
+   这里自带 400ms debounce（停下才发），并跳过明显还没输完的结尾逗号；
+   失焦/回车（change）立即提交，保证最终值一定落盘。 */
+let pdfRangeTimer = null;
+function commitPdfRange() {
+  clearTimeout(pdfRangeTimer);
+  pushSettings({ pdfPageRange: $("#set-pdf-pages").value.trim() });
+}
+$("#set-pdf-pages").addEventListener("input", () => {
+  const v = $("#set-pdf-pages").value.trim();
+  clearTimeout(pdfRangeTimer);
+  pdfRangeTimer = setTimeout(() => {
+    if (/,+\s*$/.test(v)) return;   // "1-3," 还在输入中：等下一个字符
+    pushSettings({ pdfPageRange: v });
+  }, 400);
+});
+$("#set-pdf-pages").addEventListener("change", commitPdfRange);
+$("#set-join-lines").addEventListener("change", () => {
+  pushSettings({ joinLines: $("#set-join-lines").checked });
+});
+$("#set-cjk-spacing").addEventListener("change", () => {
+  pushSettings({ cjkSpacing: $("#set-cjk-spacing").checked });
 });
 
 /* ── 设置页：Python 解释器（issue #2）──────────────────── */
@@ -1596,13 +1776,17 @@ function renderProbeResult(r) {
       : `<div style="color:#b45309;margin-top:4px">${escapeHtml(t("py.depsMissing"))}</div>`);
 }
 $("#btn-python-browse").addEventListener("click", async () => {
-  const r = await API.browseFile($("#set-python-path").value);
-  if (r && r.ok && r.path) {
-    $("#set-python-path").value = r.path;
-    pyUI.checkedPath = null;          // 路径变了，旧检测结果作废
-    $("#btn-python-apply").disabled = true;
-  } else if (r && r.error) {
-    flash(t("msg.genericFailed", { err: r.error }));
+  try {
+    const r = await API.browseFile($("#set-python-path").value);
+    if (r && r.ok && r.path) {
+      $("#set-python-path").value = r.path;
+      pyUI.checkedPath = null;          // 路径变了，旧检测结果作废
+      $("#btn-python-apply").disabled = true;
+    } else if (r && r.error) {
+      flashError(t("msg.genericFailed", { err: r.error }));
+    }
+  } catch (e) {
+    flashError(t("msg.genericFailed", { err: e.message || e }));
   }
 });
 // 手动改路径 → 已通过的检测结果作废，须重新「检测」
@@ -1625,6 +1809,8 @@ $("#btn-python-check").addEventListener("click", async () => {
       $("#btn-python-apply").disabled = false;
     }
     renderProbeResult(r);
+  } catch (e) {
+    renderProbeResult({ ok: false, error: e.message || String(e) });
   } finally {
     pyUI.checking = false;
     $("#btn-python-check").disabled = false;
@@ -1634,20 +1820,28 @@ $("#btn-python-apply").addEventListener("click", async () => {
   if (pyUI.checkedPath === null) return;
   const path = pyUI.checkedPath;
   if (!confirm(t("py.confirmApply", { path: path || t("py.defaultEnv") }))) return;
-  const r = await API.applyPython(path);
-  if (r.ok && r.restarting) {
-    $("#btn-python-apply").disabled = true;
-    flash(t("py.restarting"));
-  } else {
-    flash(r.error || t("msg.failed", { err: "apply-python" }));
+  try {
+    const r = await API.applyPython(path);
+    if (r.ok && r.restarting) {
+      $("#btn-python-apply").disabled = true;
+      flash(t("py.restarting"));
+    } else {
+      flashError(r.error || t("msg.failed", { err: "apply-python" }));
+    }
+  } catch (e) {
+    flashError(t("msg.genericFailed", { err: e.message || e }));
   }
 });
 $("#btn-python-reset").addEventListener("click", async () => {
   // 恢复默认 = 清空 pythonPath 并重启回启动器选定的 venv
   if (!confirm(t("py.confirmApply", { path: t("py.defaultEnv") }))) return;
-  const r = await API.applyPython("");
-  if (r.ok && r.restarting) flash(t("py.restarting"));
-  else flash(r.error || t("msg.failed", { err: "apply-python" }));
+  try {
+    const r = await API.applyPython("");
+    if (r.ok && r.restarting) flash(t("py.restarting"));
+    else flashError(r.error || t("msg.failed", { err: "apply-python" }));
+  } catch (e) {
+    flashError(t("msg.genericFailed", { err: e.message || e }));
+  }
 });
 
 /* ── SSE 事件 ─────────────────────────────────────────── */
