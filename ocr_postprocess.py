@@ -39,6 +39,10 @@ TABLE_OPEN_RE = re.compile(r'<table\b[^>]*>', re.I)
 SPAN_ATTR_RE = re.compile(r'\b(colspan|rowspan)\s*=\s*"([^"]*)"', re.I)
 
 DROP_LABELS = set()
+# E11：可选丢弃的「版式噪声」标签。默认**不丢**（DROP_LABELS 保持空集合不动，
+# 既有 convert()/to_gui_markdown() 行为完全不变）；只有调用方显式传
+# drop_headers=True 时才丢弃这三类，并回报丢弃块数。
+DROP_LABELS_OPT_IN = {'header', 'footer', 'page_number'}
 IMAGE_LABELS = {'image', 'figure', 'picture', 'chart', 'img', 'seal'}
 NOISE_CONTENT = {'[non-text]', '[unreadable]', '[image]', '[figure]'}
 CHAIN_TYPES = {'text', 'table'}
@@ -249,8 +253,12 @@ def _merge_table_fragments(frags):
     return merged + ('\n\n' + '\n\n'.join(extra) if extra else '')
 
 
-def _render_blocks(blocks, groups):
-    """Render each group to a Markdown item (figure/table/heading/text)."""
+def _render_blocks(blocks, groups, drop_headers=False, stats=None):
+    """Render each group to a Markdown item (figure/table/heading/text).
+
+    drop_headers: True 时丢弃 header/footer/page_number 三类块（E11），
+                  命中数累加进 stats['droppedBlocks']。
+    """
     items = []
     for members in groups:
         head = blocks[members[0]]
@@ -266,6 +274,11 @@ def _render_blocks(blocks, groups):
                 items.append(contents[0])
             continue
         if not contents or base in DROP_LABELS:
+            continue
+        if drop_headers and base in DROP_LABELS_OPT_IN:
+            # E11：页眉/页脚/页码——只在调用方显式要求时丢，且计入统计
+            if stats is not None:
+                stats['droppedBlocks'] = stats.get('droppedBlocks', 0) + 1
             continue
         if base == 'title':
             lv = max(1, head['level'] or 1)
@@ -319,8 +332,12 @@ def _drop_empty_heads(items):
             if not (it.lstrip().startswith('#') and not it.lstrip().lstrip('#').strip())]
 
 
-def convert(result):
-    """Unlimited-OCR 2 raw document string → Markdown（移植自上游 convert()）。"""
+def _convert_impl(result, drop_headers=False, stats=None):
+    """convert() 的实现体：返回 Markdown 字符串，丢弃统计写进 stats。
+
+    对外契约不变：`convert(result, drop_headers=False) -> str`；
+    需要丢弃块数时用 `convert_with_stats()`。
+    """
     text = (result or '').strip()
     if text.startswith('```markdown'):
         text = text[len('```markdown'):].strip()
@@ -330,7 +347,7 @@ def convert(result):
     blocks = _parse_blocks(text, page_base=1)
     blocks = _merge_adjacent_titles(blocks)
     groups = _build_groups(blocks)
-    items = _drop_empty_heads(_render_blocks(blocks, groups))
+    items = _drop_empty_heads(_render_blocks(blocks, groups, drop_headers, stats))
     items = _fold_head_ws(items)
     text = '\n\n'.join(items)
 
@@ -343,11 +360,32 @@ def convert(result):
     return '\n\n'.join(_single_root_titles(text.split('\n\n')))
 
 
-def to_gui_markdown(raw: str) -> str:
+def convert(result, drop_headers=False):
+    """Unlimited-OCR 2 raw document string → Markdown（移植自上游 convert()）。
+
+    契约不变：`convert(str) -> str`。drop_headers=True 时额外丢弃
+    header/footer/page_number（E11），返回值仍是纯 Markdown 字符串。
+    """
+    return _convert_impl(result, drop_headers)
+
+
+def convert_with_stats(result, drop_headers=False):
+    """convert() 的带统计变体：返回 (markdown, {"droppedBlocks": n})。"""
+    stats = {'droppedBlocks': 0}
+    return _convert_impl(result, drop_headers, stats), stats
+
+
+def to_gui_markdown(raw: str, drop_headers=False) -> str:
     """convert() + GUI 适配：图片占位 → 斜体区域说明（本工具不落盘裁剪图）。"""
-    md = convert(raw)
+    return to_gui_markdown_with_stats(raw, drop_headers)[0]
+
+
+def to_gui_markdown_with_stats(raw: str, drop_headers=False):
+    """to_gui_markdown() 的带统计变体：返回 (markdown, {"droppedBlocks": n})。"""
+    stats = {'droppedBlocks': 0}
+    md = _convert_impl(raw, drop_headers, stats)
 
     def _img_repl(m):
         page, x1, y1, x2, y2 = m.groups()
         return f'*［图片区域 第{page}页 ({x1},{y1})-({x2},{y2})］*'
-    return _IMG_PLACEHOLDER_RE.sub(_img_repl, md)
+    return _IMG_PLACEHOLDER_RE.sub(_img_repl, md), stats

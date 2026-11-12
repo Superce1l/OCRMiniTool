@@ -29,7 +29,7 @@ from pathlib import Path
 
 from downloader import RUNTIME_DIR, installed_torch_info, quick_check
 from i18n import tr
-from ocr_postprocess import PAGE_SPLIT_RE, to_gui_markdown
+from ocr_postprocess import PAGE_SPLIT_RE, to_gui_markdown_with_stats
 
 DEFAULT_PROMPT = "Multi page parsing."   # 上游 vLLM 部署的默认指令
 
@@ -321,6 +321,168 @@ def _log_infer(stats: dict, n_images: int):
         pass
 
 
+# ── 生成限幅 / 合并分组 / 切片策略（A2 / A3 / A6）─────────────────
+_MODEL_MAX_CONTEXT = 131072          # config.json 的 max_position_embeddings
+_PAGE_TOKENS_FLOOR, _PAGE_TOKENS_CEIL = 256, 65536
+_LONG_SHOT_RATIO = 3.0               # h/w 超过它算「长截图」，auto 走 base
+
+
+def _normalize_page_tokens(value) -> int:
+    """单页生成上限归一：0/None/非法 → 0（不限）；正数夹到 [256, 65536]。"""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return 0
+    if n <= 0:
+        return 0
+    return max(_PAGE_TOKENS_FLOOR, min(_PAGE_TOKENS_CEIL, n))
+
+
+def _normalize_merged_pages(value) -> int:
+    """合并单请求页数上限归一：0/None/非法/负数 → 0（不限）。"""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return n if n > 0 else 0
+
+
+def _normalize_explicit_max_new_tokens(value) -> int | None:
+    """调用方显式给的 max_new_tokens：非法/非正 → None；正数夹到上下文上限。"""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    return max(1, min(_MODEL_MAX_CONTEXT, n))
+
+
+def _effective_max_new_tokens(page_tokens: int, n_pages: int,
+                              explicit: int | None) -> int | None:
+    """本次请求实际传给模型的 max_new_tokens。
+
+    None = 不传（模型侧默认 max_length - prompt_len，仍受 131072 约束）；
+    否则 = min(单页上限 × 组内页数, 调用方显式值, 模型上下文上限)。
+    合并模式按该组页数线性放宽；单页时就是单页上限本身。
+    """
+    if not page_tokens and not explicit:
+        return None
+    caps = []
+    if page_tokens:
+        caps.append(page_tokens * max(1, int(n_pages)))
+    if explicit:
+        caps.append(int(explicit))
+    return max(1, min(min(caps), _MODEL_MAX_CONTEXT))
+
+
+def _auto_crop_mode(n_images: int, width: int = 0, height: int = 0) -> bool:
+    """auto 切片策略（纯函数，可单测）：True=gundam 动态切片，False=base 整页。
+
+    多页合并 → base（跨页上下文优先，且上游只为单图验证过切片）；
+    单图长截图（h/w > 3）→ base（切片网格会退化成一条窄柱，token 浪费且易截断）；
+    其余单图 → gundam（密集小字版面细节更好）。
+    """
+    if n_images > 1:
+        return False
+    if width <= 0 or height <= 0:
+        return True                     # 尺寸未知时保守用 gundam（旧默认）
+    return not (height / width > _LONG_SHOT_RATIO)
+
+
+def _resolve_crop_mode(paths, pref):
+    """crop_mode 设置 → 传给 model.infer 的值（None 表示不给、用模型默认）。
+
+    pref: None（沿用旧行为，原样返回 None）| "auto" | "gundam" | "base"；
+    未知取值按 "auto" 处理（宽容前端传值）。多页时 gundam 降级为 base：
+    上游只为单图验证过动态切片，多页切片属于未验证组合。
+    """
+    if pref is None:
+        return None
+    if isinstance(pref, bool):          # 兼容旧调用：直接给模型的 True/False
+        if not pref:
+            return False
+        return True if len(paths) <= 1 else False
+    p = str(pref).strip().lower()
+    if p == "gundam":
+        want = True
+    elif p == "base":
+        want = False
+    else:                               # "auto" 及未知取值
+        want = None
+    if want is None:
+        if len(paths) > 1:
+            return False
+        w = h = 0
+        try:
+            from PIL import Image
+            with Image.open(paths[0]) as im:
+                w, h = im.size
+        except Exception:               # 读不到尺寸：按「非长截图」保守处理
+            w = h = 0
+        return _auto_crop_mode(1, w, h)
+    if want and len(paths) > 1:         # 多页不支持 gundam
+        return False
+    return want
+
+
+def _plan_groups(expanded: list, merge_limit: int):
+    """在**进入推理前**把页切成组：返回 [[page,...], ...]。
+
+    单页不分组（一组一页）；多页按 merge_limit 切（0=不限 → 全部一组）。
+    分组是「可取消 + 内存可控」的前提：模型内部无法在中途停下。
+    """
+    n = len(expanded)
+    if n <= 1:
+        return [list(expanded)] if n == 1 else []
+    size = merge_limit if merge_limit > 0 else n
+    return [expanded[i:i + size] for i in range(0, n, size)]
+
+
+def _log_plan(n_pages: int, total_groups: int, group_size: int,
+              crop_mode, page_tokens: int, effective_new, drop_headers: bool):
+    """把本次识别的策略写进日志（OCR 通道）；永不抛异常。"""
+    try:
+        from applog import log_ocr
+        crop = {None: "default", True: "gundam", False: "base"}.get(
+            crop_mode, str(crop_mode))
+        bits = [f"pages={n_pages}", f"groups={total_groups}",
+                f"group_size={group_size}", f"crop={crop}",
+                f"max_page_tokens={page_tokens or 'unlimited'}",
+                f"max_new_tokens={effective_new or 'model-default'}",
+                f"drop_headers={bool(drop_headers)}"]
+        log_ocr("识别计划：" + " ".join(bits))
+        if total_groups > 1:
+            log_ocr(f"合并分组：{n_pages} 页 → {total_groups} 组（每组≤{group_size} 页，"
+                    f"组间检查取消；跨组不共享上下文，跨页表格/续页可能在组边界断开）")
+    except Exception:
+        pass
+
+
+def _log_ocr_safe(msg: str):
+    """写一条 OCR 通道日志；永不抛异常（applog 约定 + 本处再兜一层）。"""
+    try:
+        from applog import log_ocr
+        log_ocr(msg)
+    except Exception:
+        pass
+
+
+def _sum_tokens(group_stats: list[dict]):
+    """多组输出 token 求和；一组都没回传时为 None（而不是 0）。"""
+    vals = [g["outputTokens"] for g in group_stats
+            if g.get("outputTokens") is not None]
+    return sum(vals) if vals else None
+
+
+def _last_finish(group_stats: list[dict]):
+    """最后一线 finish_reason（未知/纯文本返回时 None）。"""
+    for g in reversed(group_stats):
+        if g.get("finishReason"):
+            return g["finishReason"]
+    return None
+
+
 class OcrEngine:
     """封装 Unlimited-OCR-2。recognize() 加互斥锁，多线程安全。"""
 
@@ -560,26 +722,40 @@ class OcrEngine:
     def recognize(self, image_paths: list[Path], prompt: str = "",
                   progress_cb=None, cancel_event: threading.Event | None = None,
                   max_new_tokens: int | None = None,
-                  crop_mode=None, dpi: int | None = None) -> dict:
+                  crop_mode=None, max_page_tokens: int = 0,
+                  max_merged_pages: int = 0, drop_headers: bool = False,
+                  dpi: int | None = None) -> dict:
         """识别图片（可多页）。返回 {text, pages: [str], elapsed, ...}。
 
         image_paths: 一或多张图片路径（按页序）。
         prompt: 空串 → DEFAULT_PROMPT。
-        progress_cb(stage: str, done: int, total: int, elapsed: float)
-          —— merged 模式 done/total 只有整体一条；paged 模式逐图推进。
+        progress_cb(stage, done, total, elapsed)——total 现在是**组数**：
+          merged 模式按「已完成组/总组」推进；单页仍是 0/1 → 1/1。
+        max_page_tokens: 单页生成上限（0=不限）。正数静默夹到 [256, 65536]；
+          合并模式下单请求上限 = min(max_page_tokens × 该组页数, 131072)。
+        max_merged_pages: 合并模式单次请求最大页数（0=不限）。页数超过时在
+          **进入推理前**切组（每组 ≤N 页），组间检查 cancel_event（可取消），
+          各组结果按原页序拼回。取舍：**跨组不共享上下文**——跨页表格/续页
+          可能在组边界断开；组数与这一取舍会写入 log_ocr。
+        crop_mode: None=沿用旧行为（不给模型，单图 gundam / 多页 base）；
+          "gundam"/"base"=强制；"auto"=单图 h/w>3（长截图）→ base，其余 → gundam，
+          多页 → base。多页请求 gundam 会降级为 base（上游只验证过单图切片）。
+        drop_headers: True 时后处理丢弃 header/footer/page_number 三类版面块（E11）。
         dpi: PDF 逐页光栅化分辨率；None/非法 → 200（旧行为不变），仅对 .pdf 生效。
-        max_new_tokens / crop_mode: 透传给 model.infer（None＝模型默认策略）。
 
-        merged（默认）：一次请求合并全部页（跨页上下文，<PAGE> 分隔输出）。
-        单张图片由 model.infer 的 gundam 动态切片处理。
+        merged（默认）：尽量一次请求合并多页（跨页上下文，<PAGE> 分隔输出）；
+        仅当页数超过 max_merged_pages 时才分组。
 
         既有返回字段语义不变：text（多页时带 <!-- page N --> 注释）、
-        pages（逐页 Markdown）、elapsed（秒）。此外**只增不改**：
-          tokens          输出 token 数（模型不回传时 None）
-          truncated       是否被生成上限截断（finish_reason == 'length'）
-          pagesMismatch   模型出的页数 != 提示里的页数（跨页内容可能丢失）
-          finishReason    'stop' / 'length' / None（模型返回纯文本时未知）
-          infer           度量明细（prefill/decode 秒、tokens/s 等）
+        pages（逐页 Markdown）、elapsed（秒）。此外只增不改：
+          tokens          输出 token 数（多组时求和；模型不回传时 None）
+          truncated       任一组被生成上限截断（finish_reason == 'length'）
+          pagesMismatch   任一组模型出的页数 != 提示里的页数
+          finishReason    最后一组的 'stop' / 'length' / None
+          infer           最后一组的度量明细（prefill/decode 秒、tokens/s 等）
+          groups          实际分组数（未分组=1）
+          droppedBlocks   被 drop_headers 丢弃的版面块数
+          effectiveMaxNewTokens 本次请求实际用的生成上限（None=模型默认）
         """
         if not self.ready:
             raise EngineError(tr("err.notLoaded"))
@@ -587,11 +763,19 @@ class OcrEngine:
             raise EngineError(tr("err.noImages"))
         prompt = (prompt or "").strip() or DEFAULT_PROMPT
         pdf_dpi = _normalize_dpi(dpi)
+        page_tokens = _normalize_page_tokens(max_page_tokens)     # A2
+        merge_limit = _normalize_merged_pages(max_merged_pages)   # A3
+        explicit_new = _normalize_explicit_max_new_tokens(max_new_tokens)
+        want_drop = bool(drop_headers)                            # E11
 
         cancel_event = cancel_event or self.cancel_event
         t0 = time.time()
         results: list[str] = []
         stats: dict = {}
+        group_stats: list[dict] = []
+        dropped_total = 0
+        total_groups = 1
+        effective_new = None
         # 流式钩子：识别期间 on_finalized_text 会累计字数并检查取消
         self.stream_state = {"chars": 0}
         _STREAM_HOOK["cancel_event"] = cancel_event
@@ -613,26 +797,69 @@ class OcrEngine:
                 if not expanded:
                     raise EngineError(tr("err.noPages"))
 
-                if len(expanded) == 1:
-                    if progress_cb:
-                        progress_cb(tr("eng.stageGundam"), 0, 1, 0.0)
-                    text, stats = self._infer(
-                        [expanded[0]], prompt, crop_mode=crop_mode,
-                        max_new_tokens=max_new_tokens)
-                    results = [to_gui_markdown(text)]
-                    if progress_cb:
-                        progress_cb(tr("prog.recognizeDone"), 1, 1, time.time() - t0)
+                n_pages = len(expanded)
+                # A3：分组必须在进入推理前切好——模型内部无法中途停下
+                page_groups = _plan_groups(expanded, merge_limit)
+                total_groups = len(page_groups)
+                group_size = len(page_groups[0]) if page_groups else 0
+
+                # A6：切片策略（单图可 auto；多页/分组一律 base）
+                if n_pages == 1:
+                    resolved_crop = _resolve_crop_mode(page_groups[0], crop_mode)
                 else:
-                    # 多页：合并为一次请求（模型的核心能力——跨页上下文）。
+                    resolved_crop = False
+                    if str(crop_mode or "").strip().lower() == "gundam":
+                        _log_ocr_safe("crop_mode=gundam 在多页合并下降级为 base"
+                                      "（上游只为单图验证过动态切片）")
+                # A2：本次请求的生成上限按「满组」口径（最后一组更小、实际更紧）
+                effective_new = _effective_max_new_tokens(
+                    page_tokens, group_size, explicit_new)
+                _log_plan(n_pages, total_groups, group_size, resolved_crop,
+                          page_tokens, effective_new, want_drop)
+
+                if progress_cb:
+                    stage = (tr("eng.stageGundam") if n_pages == 1
+                             else tr("eng.stageMerged", n=n_pages))
+                    progress_cb(stage, 0, total_groups, 0.0)
+
+                def _render(raw_text: str):
+                    """单页原始输出 → (GUI Markdown, 丢弃块数)。"""
+                    md, st = to_gui_markdown_with_stats(
+                        raw_text, drop_headers=want_drop)
+                    return md, int(st.get("droppedBlocks", 0) or 0)
+
+                groups_done = 0
+                for group in page_groups:
+                    if cancel_event.is_set():
+                        break           # A3 组间检查点：取消在下一组推理前生效
+                    cap = _effective_max_new_tokens(
+                        page_tokens, len(group), explicit_new)
+                    text, gstats = self._infer(
+                        group, prompt, crop_mode=resolved_crop,
+                        max_new_tokens=cap)
+                    stats = gstats
+                    group_stats.append(gstats)
+                    if n_pages == 1:
+                        md, dropped = _render(text)
+                        results = [md]
+                        dropped_total += dropped
+                    else:
+                        parts = [p for p in PAGE_SPLIT_RE.split(text) if p.strip()]
+                        for part in (parts or [text.strip()]):
+                            md, dropped = _render(part)
+                            results.append(md)
+                            dropped_total += dropped
+                    groups_done += 1
                     if progress_cb:
-                        progress_cb(tr("eng.stageMerged", n=len(expanded)), 0, 1, 0.0)
-                    text, stats = self._infer(
-                        expanded, prompt, crop_mode=False,
-                        max_new_tokens=max_new_tokens)
-                    parts = [p for p in PAGE_SPLIT_RE.split(text) if p.strip()]
-                    results = [to_gui_markdown(p) for p in parts] or [text.strip()]
-                    if progress_cb:
-                        progress_cb(tr("prog.recognizeDone"), 1, 1, time.time() - t0)
+                        progress_cb(tr("prog.recognizeDone"), groups_done,
+                                    total_groups, time.time() - t0)
+
+                if total_groups > 1 and groups_done:
+                    _log_ocr_safe(f"分组完成：{groups_done}/{total_groups} 组，"
+                                  f"{n_pages} 页")
+                if want_drop:
+                    _log_ocr_safe(
+                        f"页眉页脚丢弃：{dropped_total} 块（drop_headers=True）")
             finally:
                 for d in tmp_dirs:
                     try:
@@ -655,11 +882,15 @@ class OcrEngine:
             "pages": results,
             "elapsed": elapsed,
             # 以下为新增的中性字段（既有字段语义不变）
-            "tokens": stats.get("outputTokens"),
-            "truncated": bool(stats.get("truncated")),
-            "pagesMismatch": bool(stats.get("pagesMismatch")),
-            "finishReason": stats.get("finishReason"),
+            "tokens": _sum_tokens(group_stats),
+            "truncated": any(g.get("truncated") for g in group_stats),
+            "pagesMismatch": any(g.get("pagesMismatch") for g in group_stats),
+            "finishReason": _last_finish(group_stats),
             "infer": dict(stats),
+            # A2 / A3 / E11
+            "groups": total_groups,
+            "droppedBlocks": dropped_total,
+            "effectiveMaxNewTokens": effective_new,
         }
 
     def _infer(self, images: list[Path], prompt: str, crop_mode=None,
