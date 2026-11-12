@@ -2,13 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- CSP：脚本只允许外部同源文件；结果区的 HTML 直通另经 app.js 白名单重建，
+     这里作为第二道防线（禁内联 handler / 禁远程样式与帧 / 禁 object）。
+     注意：file:// 直接打开本文件时浏览器把它当不透明源，'self' 不匹配，
+     设计预览请改用本地静态服务器或正常启动应用。 -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>OCR MiniTool</title>
 <link rel="icon" type="image/png" href="favicon.png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Noto+Sans+SC:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="css/app.css?v=1">
+<link rel="stylesheet" href="css/app.css?v=2">
 </head>
 <body>
 <div class="app">
@@ -55,8 +57,13 @@
   <div class="main">
     <header class="topbar">
       <h1 id="view-title" data-i18n="view.ocr">Image Recognition</h1>
-      <div class="ctx" id="view-ctx"></div>
     </header>
+
+    <!-- 后端不可达（mock 模式）时不可静默：常驻横幅说明当前是演示数据 -->
+    <div class="banner banner-warn mode-banner" id="mode-banner" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <div data-i18n="mode.offlineBanner">Backend unreachable — demo mode is on; recognition and settings are disabled. Start the app from the desktop shortcut.</div>
+    </div>
 
     <div class="view-host">
 
@@ -170,8 +177,6 @@
 
           <div class="model-state-row">
             <span class="chip" id="model-state-chip" data-i18n="model.checking">Checking…</span>
-            <div class="sp"></div>
-            <button class="btn btn-ghost btn-sm" id="btn-model-unload" hidden data-i18n="model.unload">Unload model</button>
           </div>
         </div>
 
@@ -180,6 +185,7 @@
         <div class="model-load-row" style="display:flex;align-items:center;gap:12px;margin-top:14px">
           <button class="btn btn-primary" id="btn-model-download" data-i18n="model.download">Download model (~6.8 GB)</button>
           <button class="btn btn-primary" id="btn-model-load" disabled data-i18n="model.load">Load model</button>
+          <button class="btn btn-ghost" id="btn-model-cancel" hidden data-i18n="btn.cancel">Cancel</button>
           <div class="progress" id="model-progress" hidden style="flex:1;margin:0">
             <div class="meta"><span class="s" id="model-prog-status" data-i18n="model.preparing">Preparing…</span><span class="p" id="model-prog-pct">0%</span></div>
             <div class="bar"><i id="model-prog-bar" style="width:0%"></i></div>
@@ -206,7 +212,7 @@
           <div class="row"><div class="label"><div class="t" data-i18n="set.theme">Appearance</div></div>
             <div class="seg" id="set-theme"><button class="on" data-v="light" data-i18n="set.themeLight">Light</button><button data-v="dark" data-i18n="set.themeDark">Dark</button><button data-v="system" data-i18n="set.themeSystem">Follow system</button></div></div>
           <div class="row"><div class="label"><div class="t" data-i18n="set.scale">UI scale</div><div class="d" data-i18n="set.scaleDesc">Adjust text and control size</div></div>
-            <select class="select" id="set-scale"><option value="80">80%</option><option value="90">90%</option><option value="100" selected>100%</option><option value="110">110%</option><option value="125">125%</option><option value="150">150%</option></select></div>
+            <select class="select" id="set-scale"><option value="25">25%</option><option value="50">50%</option><option value="75">75%</option><option value="80">80%</option><option value="90">90%</option><option value="100" selected>100%</option><option value="110">110%</option><option value="125">125%</option><option value="150">150%</option><option value="175">175%</option><option value="200">200%</option></select></div>
           <div class="row"><div class="label"><div class="t" data-i18n="set.lang">Language</div><div class="d" data-i18n="set.langDesc">Interface language</div></div>
             <!-- 选项由 JS 按 /api/settings 的 languages 动态填充（母语显示，不随界面语言翻译） -->
             <select class="select" id="set-lang"></select></div>
@@ -238,8 +244,8 @@
 
 <input id="hidden-file" type="file" accept=".jpg,.jpeg,.png,.bmp,.webp,.tif,.tiff,.pdf" multiple style="display:none">
 <a id="download-link" style="display:none"></a>
-<script src="js/i18n.js?v=2"></script>
-<script src="js/bridge.js?v=3"></script>
-<script src="js/app.js?v=3"></script>
+<script src="js/i18n.js?v=3"></script>
+<script src="js/bridge.js?v=4"></script>
+<script src="js/app.js?v=4"></script>
 </body>
 </html>

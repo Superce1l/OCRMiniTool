@@ -41,9 +41,12 @@
   --shadow:    0 1px 2px rgba(16,32,36,.04), 0 6px 18px rgba(16,32,36,.06);
 
   /* ── 字体 ────────────────────────────────── */
-  --font-ui:   "Noto Sans SC", "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-disp: "Space Grotesk", "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
-  --font-mono: "Space Mono", "JetBrains Mono", "Consolas", "Microsoft YaHei", monospace;
+  /* 系统本地字体栈：不引外链（离线可用、符合「数据不出本机」）。
+     Windows 10/11 自带 Segoe UI；中文回退微软雅黑/系统无衬线。
+     等宽优先 Cascadia（Win11 + VS 附带），再退 Consolas。 */
+  --font-ui:   "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --font-disp: "Segoe UI Semibold", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", "Consolas", "JetBrains Mono", "Microsoft YaHei UI", monospace;
 
   --side-w: 88px;
 }
@@ -80,7 +83,7 @@
 
 /* ── 重置 ─────────────────────────────────── */
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; }
+html, body { margin: 0; height: 100%; overflow: hidden; }
 [hidden] { display: none !important; }
 body {
   font-family: var(--font-ui);
@@ -108,7 +111,11 @@ button { font-family: inherit; }
 /* ============================================================
    版面骨架
    ============================================================ */
-.app { display: flex; height: 100vh; overflow: hidden; }
+/* 界面缩放（B4）：JS 把 --ui-zoom 设为 0.25–2；zoom 生效时整块 UI 等比放大，
+   高度由 JS 按 innerHeight / zoom 反算，保证仍正好铺满窗口（不产生外层滚动）。
+   WebView2 不支持 zoom 时 JS 回退到根字号缩放，此时 --ui-zoom 恒为 1。 */
+.app { display: flex; height: 100vh; overflow: hidden;
+  zoom: var(--ui-zoom, 1); }
 
 .sidebar {
   width: var(--side-w);
@@ -179,7 +186,6 @@ button { font-family: inherit; }
   font-family: var(--font-disp);
   font-size: 17px; font-weight: 600; margin: 0; letter-spacing: .2px;
 }
-.topbar .ctx { font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 10px; }
 
 .view-host { flex: 1; overflow-y: auto; container-type: inline-size; }
 .view { display: none; width: 100%; max-width: 1080px; margin: 0 auto;
@@ -347,6 +353,8 @@ textarea.input { resize: vertical; min-height: 56px; font-size: 13px; line-heigh
   transition: border-color .12s, background .12s;
 }
 .batch-item:hover { border-color: var(--accent); background: var(--accent-tint); }
+.batch-item:disabled { cursor: default; opacity: .72; }
+.batch-item:disabled:hover { border-color: var(--line); background: var(--panel); }
 .batch-item.on { border-color: var(--accent); background: var(--accent-tint);
   box-shadow: inset 3px 0 0 var(--accent); }
 .batch-item .bn { flex: 1; min-width: 0; font-size: 13px; font-weight: 500; color: var(--ink);
@@ -466,6 +474,8 @@ textarea.input { resize: vertical; min-height: 56px; font-size: 13px; line-heigh
 .banner svg { width: 17px; height: 17px; flex: 0 0 auto; margin-top: 2px; }
 .banner-warn { background: var(--warn-bg); border: 1px solid var(--warn-line); color: var(--warn-fg); }
 .banner-info { background: var(--accent-tint); border: 1px solid var(--accent-soft); color: var(--accent-strong); }
+/* 后端不可达时常驻横幅（位于 topbar 之下、.view-host 之上，不随视图滚动） */
+.mode-banner { margin: 12px 28px 0; flex: 0 0 auto; }
 
 .dev-list { display: flex; flex-direction: column; gap: 8px; }
 .dev {

@@ -38,13 +38,25 @@
       if (MODE === "web") connectSSE();
       resolve(MODE);
     }
-    if (document.readyState === "complete") setTimeout(settle, 0);
-    else window.addEventListener("load", () => setTimeout(settle, 0), { once: true });
+    // 不等 window load：DOM 就绪即可探测后端。挂到 load 上会被外部样式表
+    // （旧版曾引 Google Fonts）拖住，网络受限时首屏长时间空白、状态全挂。
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", () => setTimeout(settle, 0), { once: true });
+    } else {
+      setTimeout(settle, 0);
+    }
   });
 
   function connectSSE() {
     try {
       const es = new EventSource("/api/events");
+      // 断线重连后补拉一次状态：SSE 只在建立时由服务端推首帧 status，
+      // 若那次首帧丢了（连接被重置），界面会一直停在旧状态。
+      es.onopen = () => {
+        apiGet("/api/status")
+          .then(s => { if (s) emit("status", s); })
+          .catch(() => { /* 后端仍不可达：等下一次重连 */ });
+      };
       es.onmessage = e => {
         try { const m = JSON.parse(e.data); if (m && m.event) emit(m.event, m.payload); }
         catch { /* 心跳/注释行 */ }
@@ -55,7 +67,12 @@
 
   async function apiGet(path) {
     const r = await fetch(path);
-    if (!r.ok) throw new Error("HTTP " + r.status);
+    if (!r.ok) {
+      // 与 apiPost 同口径：优先取后端 {"error":{"message"}}，否则回 "HTTP N"
+      let msg = "HTTP " + r.status;
+      try { msg = (await r.json()).error?.message || msg; } catch {}
+      throw new Error(msg);
+    }
     return r.json();
   }
   async function apiPost(path, body) {
@@ -91,12 +108,18 @@
     async browseFolder(start) {
       // 文件夹对话框标题用当前界面语言（后端缺省时按其后端语言兜底）
       const title = tr("dlg.pickFolder", null, "选择文件夹");
-      if (MODE === "web") { try { return await apiPost("/api/browse-folder", { start, title }); } catch {} }
+      if (MODE === "web") {
+        try { return await apiPost("/api/browse-folder", { start, title }); }
+        catch (e) { return { ok: false, path: "", error: String(e) }; }
+      }
       return { ok: false, path: "" };
     },
     async browseFile(start) {
       const title = tr("dlg.pickPython", null, "选择 Python 解释器");
-      if (MODE === "web") { try { return await apiPost("/api/browse-file", { start, title }); } catch {} }
+      if (MODE === "web") {
+        try { return await apiPost("/api/browse-file", { start, title }); }
+        catch (e) { return { ok: false, path: "", error: String(e) }; }
+      }
       return { ok: false, path: "" };
     },
     async probePython(path) {
@@ -108,8 +131,11 @@
       return { ok: false, error: "mock" };
     },
     async openOutputDir() {
-      if (MODE === "web") { try { return await apiPost("/api/open-output", {}); } catch {} }
-      return false;
+      if (MODE === "web") {
+        try { return await apiPost("/api/open-output", {}); }
+        catch (e) { return { ok: false, error: String(e) }; }
+      }
+      return { ok: false };
     },
     async startDownload() {
       if (MODE === "web") return apiPost("/api/download", {});
@@ -134,15 +160,29 @@
       return { ok: true };
     },
     async cancelEnvDownload() {
-      if (MODE === "web") { try { await apiPost("/api/env/cancel", {}); } catch {} return true; }
+      if (MODE === "web") {
+        try { await apiPost("/api/env/cancel", {}); return true; }
+        catch (e) { console.warn("[OCRApi] cancel env download failed", e); return false; }
+      }
       return true;
     },
     async cancel() {
-      if (MODE === "web") { try { await apiPost("/api/cancel", {}); } catch {} return true; }
+      if (MODE === "web") {
+        try {
+          await apiPost("/api/cancel", {});
+          return true;
+        } catch (e) {
+          console.warn("[OCRApi] cancel failed", e);
+          return false;
+        }
+      }
       MOCK.cancelled = true; return true;
     },
     async listHistory() {
-      if (MODE === "web") { try { return await apiGet("/api/history"); } catch {} }
+      if (MODE === "web") {
+        try { return await apiGet("/api/history"); }
+        catch (e) { return { items: [], error: String(e) }; }
+      }
       return { items: [] };
     },
     async readHistory(name) {
@@ -157,10 +197,6 @@
     async recognize(opts) {
       if (MODE === "web") return webRecognize(opts);
       return mockRecognize(opts);
-    },
-    async shutdown() {
-      if (MODE === "web") { try { await apiPost("/api/shutdown", {}); } catch {} }
-      return true;
     },
   };
 

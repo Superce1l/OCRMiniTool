@@ -43,9 +43,152 @@ function fmtTime(sec) {
   if (sec < 60) return t("time.sec", { s: sec });
   return t("time.minSec", { m: Math.floor(sec / 60), s: sec % 60 });
 }
+// 历史文件的修改时间：按当前界面语言格式化（B12；后端 list_history 已给 mtime 秒）
+function fmtDateTime(sec) {
+  const n = Number(sec);
+  if (!n) return "";
+  try {
+    return new Date(n * 1000).toLocaleString(window.I18N.localeTag(), {
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hour12: false,
+    });
+  } catch { return ""; }
+}
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => (
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* ── 结果区 HTML 片段消毒（B1）────────────────────────────
+   模型输出的表格等是原生 HTML，必须原样渲染；旧实现把整行直接写进
+   innerHTML，等于把 OCR 文本（可被一张图片控制）当作代码执行。
+   这里改为「只识别、不复制」：按白名单重建标签与属性，文本节点统一转义；
+   未列入白名单的标签丢弃（其文本保留），script/style 等非文本容器整段丢弃。
+   属性值一律不透传：数字属性校验取值，URL 属性校验协议。 */
+const HTML_ALLOWED_TAGS = new Set([
+  "table", "thead", "tbody", "tfoot", "tr", "th", "td",
+  "ul", "ol", "li", "p", "div", "br", "figure", "figcaption",
+  "h1", "h2", "h3", "h4", "h5", "h6",
+  "code", "pre", "blockquote", "strong", "em", "img", "a",
+]);
+const HTML_VOID_TAGS = new Set(["br", "img"]);
+// 内容不是人类可读文本的容器：整段丢弃（否则 <script> 源码会被当正文显示）
+const HTML_DROP_TAGS = new Set([
+  "script", "style", "template", "noscript", "iframe", "object", "embed",
+  "svg", "math", "link", "meta", "title", "textarea", "select", "option",
+  "form", "input", "button", "base",
+]);
+const HTML_TAG_RE = /^<\s*(\/?)\s*([a-zA-Z][a-zA-Z0-9]*)((?:"[^"]*"|'[^']*'|[^<>"'])*)>/;
+const HTML_ATTR_RE = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+const LINK_SCHEME_RE = /^(?:https?:\/\/|mailto:)/i;
+const REL_PATH_RE = /^[A-Za-z0-9._~\-/%#?=&+,;@!$()*[\]]+$/;
+const DATA_IMG_RE = /^data:image\/[a-z0-9.+-]+[;,]?/i;
+
+// 解码常见 HTML 实体（模型表格里的 &nbsp; / &amp;），解码后再统一转义
+function decodeEntities(s) {
+  return String(s)
+    .replace(/&nbsp;/gi, "\u00a0")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&#(\d{1,6});/g, (m, d) => {
+      const n = parseInt(d, 10);
+      return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : m;
+    });
+}
+const textNode = s => escapeHtml(decodeEntities(s));
+// 注意：URL 属性先解码实体再校验协议（否则 &#106;avascript: 这类编码能绕过校验），
+// 校验通过的值只做 HTML 转义即可。
+const attrValue = s => escapeHtml(String(s));
+
+function parseHtmlAttrs(raw) {
+  const out = {};
+  let m;
+  HTML_ATTR_RE.lastIndex = 0;
+  while ((m = HTML_ATTR_RE.exec(raw))) {
+    const name = m[1].toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(out, name)) continue;
+    out[name] = m[2] !== undefined ? m[2]
+      : (m[3] !== undefined ? m[3] : (m[4] !== undefined ? m[4] : ""));
+  }
+  return out;
+}
+
+function safeAttrString(tag, attrs) {
+  const parts = [];
+  for (const name of Object.keys(attrs)) {
+    const raw = String(attrs[name]);
+    if (name === "colspan" || name === "rowspan") {
+      if (tag !== "th" && tag !== "td") continue;
+      if (!/^\d{1,3}$/.test(raw)) continue;
+      const n = parseInt(raw, 10);
+      if (n >= 1 && n <= 99) parts.push(`${name}="${n}"`);
+    } else if (name === "href" && tag === "a") {
+      const v = decodeEntities(raw).trim();
+      if (LINK_SCHEME_RE.test(v) && !/[\s\u0000-\u001f\u007f]/.test(v)) {
+        parts.push(`href="${attrValue(v)}"`);
+      }
+    } else if (name === "src" && tag === "img") {
+      const v = decodeEntities(raw).trim();
+      if (!v || /[\u0000-\u001f\u007f]/.test(v)) continue;
+      if (LINK_SCHEME_RE.test(v)) parts.push(`src="${attrValue(v)}"`);
+      else if (DATA_IMG_RE.test(v) && !/[\s<>]/.test(v)) parts.push(`src="${attrValue(v)}"`);
+      else if (REL_PATH_RE.test(v) && !v.startsWith("//")) parts.push(`src="${attrValue(v)}"`);
+    }
+    // 其余属性（on*、style、class、id、srcset…）一律丢弃
+  }
+  if (tag === "a" && parts.some(p => p.startsWith("href="))) {
+    parts.push("target=\"_blank\"", "rel=\"noopener noreferrer\"");
+  }
+  return parts.length ? " " + parts.join(" ") : "";
+}
+
+function sanitizeHtmlFragment(html) {
+  const src = String(html == null ? "" : html);
+  const out = [];
+  const stack = [];
+  let i = 0;
+  while (i < src.length) {
+    const lt = src.indexOf("<", i);
+    if (lt < 0) { out.push(textNode(src.slice(i))); break; }
+    if (lt > i) out.push(textNode(src.slice(i, lt)));
+    if (src.startsWith("<!--", lt)) {          // 注释整段丢弃
+      const end = src.indexOf("-->", lt + 4);
+      i = end < 0 ? src.length : end + 3;
+      continue;
+    }
+    if (src.startsWith("<!", lt) || src.startsWith("<?", lt)) {
+      const end = src.indexOf(">", lt + 2);
+      i = end < 0 ? src.length : end + 1;
+      continue;
+    }
+    const m = HTML_TAG_RE.exec(src.slice(lt));
+    if (!m) { out.push("&lt;"); i = lt + 1; continue; }   // 裸 '<' 当文本
+    const closing = m[1] === "/";
+    const tag = m[2].toLowerCase();
+    i = lt + m[0].length;
+    if (closing) {
+      if (!HTML_ALLOWED_TAGS.has(tag) || HTML_VOID_TAGS.has(tag)) continue;
+      const at = stack.lastIndexOf(tag);
+      if (at < 0) continue;
+      while (stack.length > at) out.push(`</${stack.pop()}>`);
+      continue;
+    }
+    if (HTML_DROP_TAGS.has(tag)) {
+      // 整段丢弃到对应闭合标签（找不到就丢到结尾）；不解析其内部
+      const close = new RegExp(`</\\s*${tag}\\s*>`, "i");
+      const cm = close.exec(src.slice(i));
+      i = cm ? i + cm.index + cm[0].length : src.length;
+      continue;
+    }
+    if (!HTML_ALLOWED_TAGS.has(tag)) continue;   // 标签丢弃，文本保留
+    out.push(`<${tag}${safeAttrString(tag, parseHtmlAttrs(m[3] || ""))}>`);
+    if (!HTML_VOID_TAGS.has(tag)) stack.push(tag);
+  }
+  while (stack.length) out.push(`</${stack.pop()}>`);
+  return out.join("");
 }
 function flash(msg) {
   logLine(msg);
@@ -85,17 +228,50 @@ function applyTheme(pref) {
   document.documentElement.dataset.theme = dark ? "dark" : "light";
 }
 mqDark?.addEventListener?.("change", () => {
-  if ((state.status?.theme || "light") === "system") applyTheme("system");
+  // 主题偏好存在设置里（get_status 不带 theme，见 F18），不要读 state.status
+  if ((state.settings?.theme || "light") === "system") applyTheme("system");
 });
-function applyScale(pct) {
-  document.documentElement.style.fontSize = (16 * (pct || 100) / 100) + "px";
+
+/* 界面缩放（B4）：CSS 里全站都是 px，改根字号不会缩放任何控件。
+   Chromium/WebView2 支持 zoom 时对 .app 整体等比缩放，并按 innerHeight/zoom
+   反算高度，保证缩放后仍正好铺满窗口；不支持时回退到根字号（文字生效）。 */
+const MIN_SCALE = 25, MAX_SCALE = 200;
+// 优先用 style 属性存在性判断（Chromium 一直认 zoom，哪怕旧版 CSS.supports 不报）；
+// 都不认时退回字号缩放，行为与旧版一致。
+const CAN_ZOOM = (() => {
+  try {
+    if (document.documentElement && "zoom" in document.documentElement.style) return true;
+    return typeof CSS !== "undefined" && !!CSS.supports && CSS.supports("zoom", "1");
+  } catch { return false; }
+})();
+let curScale = 100;
+function syncAppHeight() {
+  const app = $(".app");
+  if (!app || !CAN_ZOOM) return;
+  app.style.height = Math.max(1, Math.round(window.innerHeight / (curScale / 100))) + "px";
 }
+function applyScale(pct) {
+  const n = Math.min(MAX_SCALE, Math.max(MIN_SCALE, Math.round(+pct || 100)));
+  curScale = n;
+  const root = document.documentElement;
+  if (CAN_ZOOM) {
+    root.style.setProperty("--ui-zoom", String(n / 100));
+    root.style.fontSize = "";
+    syncAppHeight();
+  } else {
+    root.style.setProperty("--ui-zoom", "1");
+    root.style.fontSize = (16 * n / 100) + "px";
+  }
+}
+window.addEventListener("resize", () => { if (CAN_ZOOM) syncAppHeight(); });
 
 /* ── 语言切换：静态属性已由 I18N.applyAll 重刷，这里补动态区域 ── */
 function retranslate() {
   switchView(state.view);
   renderFiles();
   applyStatus(state.status);
+  // Python 探测结果是用 t() 即时生成的，语言切换后必须重渲染（F/I2）
+  if (pyUI.lastProbe) renderProbeResult(pyUI.lastProbe);
   if (state.batchItems && state.lastBatchResult) showBatchResult(state.lastBatchResult);
   else if (state.lastResult) showResultPages();
   refreshHistory();
@@ -162,6 +338,16 @@ hiddenFile.addEventListener("change", () => {
   drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hot"); }));
 drop.addEventListener("drop", e => {
   addFiles([...(e.dataTransfer?.files || [])]);
+});
+// 文档级兜底（B14）：文件落在拖放区之外时，Chromium 默认会导航到该文件，
+// 整个界面连同未保存结果一起丢失。这里统一拦住并提示正确落点。
+document.addEventListener("dragover", e => {
+  if (!drop.contains(e.target)) e.preventDefault();
+});
+document.addEventListener("drop", e => {
+  if (drop.contains(e.target)) return;
+  e.preventDefault();
+  flash(t("msg.dropOutside"));
 });
 
 function addFiles(list) {
@@ -261,9 +447,9 @@ function setProgress(pct, status) {
 }
 
 /* ── 结果渲染（轻量 Markdown）──────────────────────────── */
-// 模型输出里的表格是原生 HTML（<table><tr><td>…），需原样通过而非转义
-const HTML_BLOCK_RE = /^\s*<\/?(table|thead|tbody|tfoot|tr|th|td|ul|ol|li|p|div|br|figure|figcaption|h[1-6])\b/i;
-const HTML_DANGEROUS_RE = /^\s*<\s*(script|iframe|object|embed|link|meta)\b/i;
+// 模型输出里的表格是原生 HTML（<table><tr><td>…），需要渲染而非转义；
+// 但它经 sanitizeHtmlFragment 白名单重建后才允许进入 innerHTML（B1）。
+const HTML_BLOCK_RE = /^\s*<\/?(table|thead|tbody|tfoot|tr|th|td|ul|ol|li|p|div|br|figure|figcaption|blockquote|pre|code|strong|em|img|a|h[1-6])\b/i;
 
 function mdToHtml(md) {
   const lines = String(md).split(/\r?\n/);
@@ -272,14 +458,29 @@ function mdToHtml(md) {
 
   const closeList = () => { if (listType) { out.push(`</${listType}>`); listType = null; } };
 
+  // 行内链接/图片的协议白名单（S5）：只放行 http(s)/mailto、图片 data:image、相对路径
+  const INLINE_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+  const isSafeUrl = (u, allowImage) => {
+    const v = String(u == null ? "" : u).trim();
+    if (!v) return false;
+    if (/^(?:https?:\/\/|mailto:)/i.test(v)) return true;
+    if (allowImage && /^data:image\/[a-z0-9.+-]+[;,]?/i.test(v)) return true;
+    return !INLINE_SCHEME_RE.test(v);   // 无 scheme ⇒ 相对路径/锚点
+  };
+
   const inline = s => escapeHtml(s)
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/\*([^*\n]+)\*/g, "<em>$1</em>")
-    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img alt="$1" src="$2">')
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (m0, alt, src) =>
+      isSafeUrl(src, true) ? `<img alt="${alt}" src="${src}">` : "")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m0, txt, href) =>
+      isSafeUrl(href, false)
+        ? `<a href="${href}" target="_blank" rel="noopener noreferrer">${txt}</a>`
+        : txt);
 
-  for (const raw of lines) {
+  for (let li = 0; li < lines.length; li++) {
+    const raw = lines[li];
     if (/^```/.test(raw.trim())) {
       if (inCode) { out.push(`<pre><code>${escapeHtml(codeBuf.join("\n"))}</code></pre>`); codeBuf = []; inCode = false; }
       else { closeList(); inCode = true; }
@@ -289,10 +490,21 @@ function mdToHtml(md) {
 
     const line = raw.trimEnd();
     let m;
-    // 原生 HTML 块（模型输出的表格等）：原样插入；危险标签仍转义
-    if (HTML_BLOCK_RE.test(line) && !HTML_DANGEROUS_RE.test(line)) {
+    // 原生 HTML 块：连续块行合并后消毒（多行 <table>/<div> 结构因此不会被拆散）。
+    // 续行放宽到「以 <标签 开头」的行，这样 <div> 里嵌套的 <span>/<img> 等
+    // 也会交给消毒器处理，而不是被拆成 Markdown 段落。
+    if (HTML_BLOCK_RE.test(line)) {
       closeList();
-      out.push(line);
+      const buf = [line];
+      while (li + 1 < lines.length) {
+        const next = lines[li + 1].trimEnd();
+        const isCont = /^\s*<\s*[!/]?\s*[a-zA-Z]/.test(next);
+        if (!HTML_BLOCK_RE.test(next) && !isCont) break;
+        buf.push(next);
+        li++;
+      }
+      const safe = sanitizeHtmlFragment(buf.join("\n"));
+      if (safe.trim()) out.push(safe);
       continue;
     }
     if ((m = line.match(/^(#{1,6})\s+(.*)/))) {
@@ -373,11 +585,11 @@ function showBatchResult(result) {
       ? escapeHtml(t("result.charsTime", { chars: it.chars, time: fmtTime(it.elapsed) }))
       : (it.error ? escapeHtml(it.error.slice(0, 80)) : "—");
     return `
-      <button class="batch-item${i === state.viewIndex ? " on" : ""}" data-i="${i}">
+      <button class="batch-item${i === state.viewIndex ? " on" : ""}" data-i="${i}"${it.ok ? "" : " disabled"}>
         <span class="bn" title="${escapeHtml(it.name)}">${escapeHtml(it.name)}</span>
         ${badge}
         <span class="bm">${meta}</span>
-        <span class="bx">${escapeHtml(t("result.view"))}</span>
+        <span class="bx">${it.ok ? escapeHtml(t("result.view")) : ""}</span>
       </button>`;
   }).join("");
   $("#result-meta").textContent = t("result.batchMeta", {
@@ -414,9 +626,13 @@ function showResultPages() {
     tabs.innerHTML = "";
     state.curPage = 0;
   }
-  $("#result-meta").textContent = t("result.pageMeta", {
-    n: pages.length || 1, time: fmtTime(r.elapsed),
-  });
+  $("#result-meta").textContent = r.elapsed == null
+    ? t("result.historyMeta", { chars: (r.text || "").length })
+    : t("result.pageMeta", {
+        n: pages.length || 1,
+        chars: (r.text || "").length,
+        time: fmtTime(r.elapsed),
+      });
   renderResultText();
 }
 
@@ -495,18 +711,23 @@ $("#btn-open-dir").addEventListener("click", () => API.openOutputDir());
 
 /* ── 最近识别 ─────────────────────────────────────────── */
 async function refreshHistory() {
-  const { items } = await API.listHistory();
+  // bridge 失败时返回 {items:[], error}，这里必须兜底（旧实现直接解构会 TypeError）
+  const r = await API.listHistory();
+  const items = (r && r.items) || [];
   const head = $("#history-head"), list = $("#history-list");
   if (!items.length) { head.hidden = true; list.hidden = true; return; }
   head.hidden = false; list.hidden = false;
-  list.innerHTML = items.map(it => `
+  list.innerHTML = items.map(it => {
+    const when = fmtDateTime(it.mtime);
+    return `
     <button class="history-item" data-name="${escapeHtml(it.name)}">
       <span class="hn">${escapeHtml(it.name)}</span>
-      <span class="hm">${fmtSize(it.size)}</span>
+      <span class="hm"${when ? ` title="${escapeHtml(when)}"` : ""}>${escapeHtml(fmtSize(it.size))}${when ? " · " + escapeHtml(when) : ""}</span>
       <span class="hx" data-del="${escapeHtml(it.name)}" role="button" aria-label="${escapeHtml(t("history.delete"))}" tabindex="0">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
       </span>
-    </button>`).join("");
+    </button>`;
+  }).join("");
 }
 $("#history-list").addEventListener("click", async e => {
   const del = e.target.closest(".hx");
@@ -514,18 +735,22 @@ $("#history-list").addEventListener("click", async e => {
     e.stopPropagation();
     const name = del.dataset.del;
     if (!confirm(t("msg.confirmDelete", { name }))) return;
-    await API.deleteHistory(name);
+    const r = await API.deleteHistory(name);
+    if (r && !r.ok) flash(t("msg.genericFailed", { err: r.error || "history-delete" }));
     refreshHistory();
     return;
   }
   const item = e.target.closest(".history-item");
   if (!item) return;
   const r = await API.readHistory(item.dataset.name);
-  if (r.ok) {
-    state.lastResult = { text: r.text, pages: [r.text], outPath: r.name, elapsed: 0 };
+  if (r && r.ok) {
+    // 历史文件没有「页/耗时」概念：elapsed=null，元信息显示字数 + 历史文件
+    state.lastResult = { text: r.text, pages: [r.text], outPath: r.name, elapsed: null };
     state.curPage = 0;
     showResult(state.lastResult);
     flash(t("msg.loadedHistory", { name: r.name }));
+  } else {
+    flash(t("msg.genericFailed", { err: (r && r.error) || "history-read" }));
   }
 });
 
@@ -601,7 +826,11 @@ function renderModelPage() {
   dl.textContent = st.modelState === "downloaded" || st.modelState === "ready"
     ? t("model.redownload") : t("model.download");
   ld.disabled = st.modelState !== "downloaded" || !!st.busy;
-  $("#btn-model-unload").hidden = st.modelState !== "ready";
+  // 下载/加载中给出取消出口（后端 cancel() 对「下载/识别」两类任务都生效）
+  const cancelable = ["downloading", "loading"].includes(st.modelState);
+  const cancelBtn = $("#btn-model-cancel");
+  cancelBtn.hidden = !cancelable;
+  cancelBtn.disabled = !cancelable;
 
   // 错误横幅
   const msg = $("#model-msg");
@@ -621,18 +850,41 @@ function shortPath(p, n = 46) {
 $("#btn-model-download").addEventListener("click", async () => {
   $("#model-progress").hidden = false;
   setModelProgress(0, t("model.prepDownload"));
-  const r = await API.startDownload();
-  if (!r.ok) flash(r.error || t("msg.cannotDownload"));
+  $("#btn-model-cancel").hidden = false;
+  $("#btn-model-cancel").disabled = false;
+  try {
+    const r = await API.startDownload();
+    if (!r || !r.ok) {
+      flash((r && r.error) || t("msg.cannotDownload"));
+      $("#btn-model-cancel").hidden = true;
+    }
+  } catch (e) {
+    flash(t("msg.genericFailed", { err: e.message || e }));
+    $("#btn-model-cancel").hidden = true;
+  }
 });
 $("#btn-model-load").addEventListener("click", async () => {
   $("#model-progress").hidden = false;
   setModelProgress(5, t("model.startLoad"));
-  const r = await API.startLoad();
-  if (!r.ok) { flash(r.error || t("msg.cannotLoad")); $("#model-progress").hidden = true; }
+  $("#btn-model-cancel").hidden = false;
+  $("#btn-model-cancel").disabled = false;
+  try {
+    const r = await API.startLoad();
+    if (!r || !r.ok) {
+      flash((r && r.error) || t("msg.cannotLoad"));
+      $("#model-progress").hidden = true;
+      $("#btn-model-cancel").hidden = true;
+    }
+  } catch (e) {
+    flash(t("msg.genericFailed", { err: e.message || e }));
+    $("#model-progress").hidden = true;
+    $("#btn-model-cancel").hidden = true;
+  }
 });
-$("#btn-model-unload").addEventListener("click", async () => {
-  // 卸载：暂以重启进程外的方式不支持 → 提示
-  flash(t("msg.unloadHint"));
+// 取消模型下载/加载：复用既有 /api/cancel（B5）
+$("#btn-model-cancel").addEventListener("click", async () => {
+  const ok = await API.cancel();
+  flash(ok ? t("msg.cancelRequested") : t("msg.genericFailed", { err: "cancel" }));
 });
 
 function setModelProgress(pct, status) {
@@ -712,9 +964,18 @@ $("#btn-flavor-download").addEventListener("click", async () => {
   if (!pick) { flash(t("env.pickFirst")); return; }
   $("#flavor-progress").hidden = false;
   setFlavorProgress(0, t("model.prepDownload"));
-  const r = await API.startEnvDownload(pick);
-  if (!r.ok) { flash(r.error || t("msg.cannotLoad")); $("#flavor-progress").hidden = true; }
-  if (r.already) { $("#flavor-progress").hidden = true; loadEnv(); }
+  try {
+    const r = await API.startEnvDownload(pick);
+    if (!r || !r.ok) {
+      flash((r && r.error) || t("msg.cannotLoad"));
+      $("#flavor-progress").hidden = true;
+      return;
+    }
+    if (r.already) { $("#flavor-progress").hidden = true; loadEnv(); }
+  } catch (e) {
+    flash(t("msg.genericFailed", { err: e.message || e }));
+    $("#flavor-progress").hidden = true;
+  }
 });
 $("#btn-flavor-cancel").addEventListener("click", () => API.cancelEnvDownload());
 
@@ -744,12 +1005,25 @@ function renderLangOptions(langs) {
   $("#set-lang").innerHTML = list.map(l =>
     `<option value="${escapeHtml(l.code)}">${escapeHtml(l.name)}</option>`).join("");
 }
+// 缩放下拉：后端可能存着下拉里没有的档位（旧版本/手改 settings.json），
+// 不能让它显示成空白——缺档就补一个 option 再选中。
+function setScaleSelect(v) {
+  const sel = $("#set-scale");
+  const val = String(v || 100);
+  if (![...sel.options].some(o => o.value === val)) {
+    const o = document.createElement("option");
+    o.value = val;
+    o.textContent = val + "%";
+    sel.appendChild(o);
+  }
+  sel.value = val;
+}
 function fillSettings(s) {
   if (!s) return;
   state.settings = s;
   $("#set-model-dir").value = s.modelDir || "";
   $("#set-mirror").value = s.mirror || "";
-  $("#set-scale").value = String(s.scale || 100);
+  setScaleSelect(s.scale || 100);
   $$("#set-device button").forEach(b => b.classList.toggle("on", b.dataset.v === (s.devicePref || "auto")));
   $$("#set-theme button").forEach(b => b.classList.toggle("on", b.dataset.v === (s.theme || "light")));
   $$("#set-outfmt button").forEach(b => b.classList.toggle("on", b.dataset.v === (s.outFormat || "md")));
@@ -763,20 +1037,31 @@ function fillSettings(s) {
   if (window.I18N.lang !== wantLang) window.I18N.setLang(wantLang);
 }
 let saveTimer = null;
+let pendingSettings = {};   // 同一 debounce 窗口内的多次改动必须合并，不能只发最后一次
 function pushSettings(patch) {
+  Object.assign(pendingSettings, patch || {});
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(async () => {
+  saveTimer = setTimeout(flushSettings, 250);
+}
+async function flushSettings() {
+  const patch = pendingSettings;
+  pendingSettings = {};
+  if (!Object.keys(patch).length) return;
+  try {
     const s = await API.setSettings(patch);
     fillSettings(s);
     const st = await API.getStatus();
     applyStatus(st);
     flash(t("msg.settingsSaved"));
-  }, 250);
+  } catch (e) {
+    flash(t("msg.genericFailed", { err: e.message || e }));
+  }
 }
 $("#set-model-dir").addEventListener("change", () => pushSettings({ modelDir: $("#set-model-dir").value.trim() }));
 $("#btn-model-dir-browse").addEventListener("click", async () => {
   const r = await API.browseFolder($("#set-model-dir").value);
-  if (r.ok && r.path) { $("#set-model-dir").value = r.path; pushSettings({ modelDir: r.path }); }
+  if (r && r.ok && r.path) { $("#set-model-dir").value = r.path; pushSettings({ modelDir: r.path }); }
+  else if (r && r.error) flash(t("msg.genericFailed", { err: r.error }));
 });
 $("#set-mirror").addEventListener("change", () => pushSettings({ mirror: $("#set-mirror").value.trim() }));
 $("#set-outfmt").addEventListener("click", e => {
@@ -799,6 +1084,7 @@ const pyUI = {
   checkedPath: null,     // null=未检测；否则为已通过检测的路径（""=恢复默认）
   checking: false,
   renderedPath: null,    // 已渲染进输入框的 pythonPath（避免任意设置保存清掉编辑）
+  lastProbe: null,       // 最近一次探测结果（语言切换时重渲染用）
 };
 function renderPythonSettings(s) {
   // 冻结版（PyInstaller）无解释器概念：整卡隐藏
@@ -818,6 +1104,7 @@ function renderPythonSettings(s) {
   }
 }
 function renderProbeResult(r) {
+  pyUI.lastProbe = r;          // 语言切换后 retranslate 需要用它重渲染
   const out = $("#py-probe-out");
   $("#py-probe-row").hidden = false;
   if (!r.ok) {
@@ -842,10 +1129,12 @@ function renderProbeResult(r) {
 }
 $("#btn-python-browse").addEventListener("click", async () => {
   const r = await API.browseFile($("#set-python-path").value);
-  if (r.ok && r.path) {
+  if (r && r.ok && r.path) {
     $("#set-python-path").value = r.path;
     pyUI.checkedPath = null;          // 路径变了，旧检测结果作废
     $("#btn-python-apply").disabled = true;
+  } else if (r && r.error) {
+    flash(t("msg.genericFailed", { err: r.error }));
   }
 });
 // 手动改路径 → 已通过的检测结果作废，须重新「检测」
@@ -902,10 +1191,13 @@ API.on("progress", ({ pct, status }) => {
 API.on("dl-progress", ({ pct, status }) => {
   $("#model-progress").hidden = false;
   setModelProgress(pct, status);
+  // pct 0 = 取消/失败，1 = 完成：两种终点都收起取消按钮
+  if (pct === 0 || pct >= 1) $("#btn-model-cancel").hidden = true;
 });
 API.on("load-progress", ({ pct, status }) => {
   $("#model-progress").hidden = false;
   setModelProgress(pct, status);
+  if (pct === 0 || pct >= 1) $("#btn-model-cancel").hidden = true;
 });
 
 /* ── 关闭兜底（浏览器/Edge 模式；native=1 时跳过，由原生弹窗负责）─── */
@@ -921,6 +1213,11 @@ if (!new URLSearchParams(location.search).get("native")) {
 /* ── 启动 ─────────────────────────────────────────────── */
 (async function init() {
   await API.ready;
+  // 传输层回退到 mock（file:// 预览或后端不可达）时不能静默：常驻横幅说明
+  if (API.mode !== "web") {
+    const banner = $("#mode-banner");
+    if (banner) banner.hidden = false;
+  }
   try {
     const s = await API.getSettings();
     await window.I18N.setLang(s.lang || "zh");   // 先定语言再刷界面
@@ -928,6 +1225,10 @@ if (!new URLSearchParams(location.search).get("native")) {
     applyStatus(await API.getStatus());
   } catch (e) {
     console.warn("init status failed", e);
+    // 后端在但读不到设置/状态：同样给出可见提示，不让界面停在空白
+    const banner = $("#mode-banner");
+    if (banner) banner.hidden = false;
+    flash(t("msg.genericFailed", { err: e.message || e }));
   }
   refreshHistory();
   flash(API.mode === "web" ? t("msg.readyWeb") : t("msg.readyDemo"));
