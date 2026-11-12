@@ -231,12 +231,26 @@ def check_version():
     # 只统计"版本号用法"（v1.2.3 / 版本 1.2.3 / -v1.2.3-），避免把
     # pythonnet==3.1.0 这类依赖版本当成应用版本误报
     VER_USE_RE = re.compile(r"(?:^|[\s(（\[\-_,，]|版本\s*)v?(\d+\.\d+\.\d+)(?=[\s)\]）\-,，.]|$)")
+    # 历史锚点（"v1.3.1 起" / "v1.1.2 之前" / "历史版本 v1.0.0"）是合法的旧版本引用，
+    # 不该被当成版本漂移
+    HIST_RE = re.compile(r"起|之前|以前|以来|历史|旧版|自\s*v?\d")
     for extra in ("README.md", "OCRMiniTool.spec"):
         p = ROOT / extra
         if not p.is_file():
             continue
         text = p.read_text(encoding="utf-8", errors="replace")
-        found = set(VER_USE_RE.findall(text))
+        if extra.endswith(".spec"):
+            # spec 的注释里大量引用历史版本（"2.2.9 式改造（v1.1.2）"），那是
+            # 变更记录不是构建口径；只检查真正会被执行的代码行。
+            text = "\n".join(
+                ln for ln in text.splitlines()
+                if not ln.lstrip().startswith("#"))
+        found = set()
+        for mm in VER_USE_RE.finditer(text):
+            ctx = text[max(0, mm.start() - 8):mm.end() + 6]
+            if HIST_RE.search(ctx):
+                continue
+            found.add(mm.group(1))
         stale = sorted(x for x in found if x != ver)
         if stale:
             warn(f"[ver] {extra} 中出现与 APP_VERSION={ver} 不同的版本号：{', '.join(stale)}")

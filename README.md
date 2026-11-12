@@ -39,7 +39,8 @@
   下载运行时组件——CPU（约 260MB）/ CUDA 12.8 · NVIDIA 专用（约 3.3GB，自带
   CUDA 运行时，无需装 Toolkit，需 570+ 驱动）。断点续传、装完即用；进入模型页
   时自动检测硬件并推荐（组件由 `build_components.py` 从官方 wheel 打包，
-  发布于仓库 GitHub Release）
+  发布于仓库 GitHub Release）。**换组件需要退出程序再重开**：运行中已加载的
+  DLL 无法覆盖，程序会提前拦下并提示，不会让你白等一次 3.5 GB 下载
 - 🕘 **最近识别**：`outputs/` 产出列表，点击回填查看；删除进回收站
 - 🎨 **深浅色主题 + 界面缩放**
 - 🌍 **多语言界面**：中文（默认）/ English，设置页下拉切换、即时生效；
@@ -273,7 +274,7 @@ python cli.py status                                           # 模型/环境�
 | 操作系统 | Windows 10 / 11（64-bit） |
 | 内存 | 16 GB 以上（权重 6.7 GB + 运行开销） |
 | 硬盘 | 12 GB 以上（模型 6.8 GB + CUDA 组件 3.3 GB + 程序与输出；不装 CUDA 组件约 8 GB） |
-| GPU | 可选：NVIDIA（CUDA 12.8+）≥8 GB 显存；无 GPU 走 CPU |
+| GPU | 可选：NVIDIA（CUDA 12.8+）**建议 ≥8 GB 显存**。6 GB 卡能加载但会因显存不足来回搬数据（实测长图 1.6 tok/s，比 CPU 还慢）——`自动` 设备会按显存回落 CPU |
 | WebView2 | Windows 11 内建；Windows 10 需安装 Edge WebView2 Runtime（缺失时自动改用 Edge --app 窗口） |
 
 ---
