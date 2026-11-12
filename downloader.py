@@ -12,8 +12,10 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import ssl
 import sys
 import time
@@ -367,6 +369,155 @@ class CancelledError(RuntimeError):
     """用户取消下载。"""
 
 
+# ── D5：组件包整包 sha256 校验（warn-only / strict 两阶段）────────────
+# 下载/拼接完成、**解压之前**校验整包哈希，弥补「只有 Content-Length」的完整性缺口。
+# 期望值来源（优先级从高到低）：
+#   ① _TORCH_FLAVORS[flavor]["sha256"]（发布后回填，空=跳过）
+#   ② 远端 <zip_url>.sha256（纯文本，取第一个 64 位 hex；多写文件名也兼容）
+#   ③ 远端 manifest.json（build_components.py 产出；兼容扁平与 {"zips": {...}} 两种结构）
+# 模式：默认 warn-only（不一致只记 WARN，继续安装）；环境变量
+#       OCRMT_VERIFY_RUNTIME=strict 时删掉 zip 与分卷并抛清晰异常。
+# 边界：远端取不到/内容非法/拿不到期望值 → 一律 WARN 不阻断（strict 也不删）。
+# 与 D6 的关系：只在拼接/下载完成之后读 final zip，不改变分卷续传/暂存逻辑。
+_VERIFY_ENV = "OCRMT_VERIFY_RUNTIME"
+_SHA256_HEX_RE = re.compile(r"[0-9a-fA-F]{64}")
+_REMOTE_HASH_TIMEOUT = 4.0
+# 远端哈希端点本进程内已确认不可用时置 True，后续下载不再为它反复等网络。
+_REMOTE_HASH_DOWN = False
+
+
+def verify_mode() -> str:
+    """当前校验模式：'strict' 或 'warn'（默认）。"""
+    return "strict" if (os.environ.get(_VERIFY_ENV) or "").strip().lower() == "strict" else "warn"
+
+
+def normalize_sha256(text) -> str | None:
+    """从自由文本里取第一个 64 位 hex（小写）；没有/非法返回 None。"""
+    if not text:
+        return None
+    for token in str(text).split():
+        if _SHA256_HEX_RE.fullmatch(token):
+            return token.lower()
+    return None
+
+
+def sha256_file(path) -> str:
+    """整包 sha256（1 MiB 分块，3.5 GB 也不吃内存）。"""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _fetch_text(url: str, timeout: float = _REMOTE_HASH_TIMEOUT) -> str | None:
+    """取远端小文本（.sha256 / manifest.json）；任何失败返回 None，绝不抛。"""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": _UA})
+        with urllib.request.urlopen(req, timeout=timeout,
+                                    context=_ssl_ctx()) as resp:
+            return resp.read(64 * 1024).decode("utf-8", "replace")
+    except Exception:
+        return None
+
+
+def _expected_sha256(meta: dict, zip_url: str, zip_name: str,
+                     notes: list[str]) -> tuple[str | None, str]:
+    """按优先级解析期望哈希 → (hash|None, 来源标签)；失败原因追加到 notes。"""
+    global _REMOTE_HASH_DOWN
+    a = normalize_sha256(meta.get("sha256"))
+    if a:
+        return a, "flavor"
+    notes.append("flavor.sha256 未配置")
+
+    if _REMOTE_HASH_DOWN:
+        notes.append("远端哈希端点本进程内已失败，跳过网络")
+        return None, "unavailable"
+
+    text = _fetch_text(zip_url + ".sha256")
+    if text is None:
+        notes.append("远端 <zip>.sha256 不可用（缺失/网络失败）")
+    else:
+        b = normalize_sha256(text)
+        if b:
+            return b, "remote .sha256"
+        notes.append("远端 <zip>.sha256 内容不是 64 位 hex")
+
+    mtext = _fetch_text(f"{_TORCH_REL_BASE}/manifest.json")
+    if mtext is None:
+        notes.append("远端 manifest.json 不可用")
+    else:
+        try:
+            data = json.loads(mtext)
+        except Exception:
+            data = None
+            notes.append("远端 manifest.json 不是合法 JSON")
+        if isinstance(data, dict):
+            entry = data.get(zip_name)
+            if entry is None and isinstance(data.get("zips"), dict):
+                entry = data["zips"].get(zip_name)
+            if isinstance(entry, dict):
+                c = normalize_sha256(entry.get("sha256"))
+                if c:
+                    return c, "manifest.json"
+                notes.append("manifest.json 中该 zip 的 sha256 为空/非法")
+            else:
+                notes.append("manifest.json 中无该 zip 条目")
+    _REMOTE_HASH_DOWN = True      # 两个端点都不可用 → 本进程不再重试
+    return None, "unavailable"
+
+
+def _verify_zip_sha256(flavor: str, zip_path: Path, meta: dict,
+                       parts=()) -> None:
+    """解压前校验整包 sha256；按 verify_mode() 决定 WARN 还是删包抛错。"""
+    from applog import log_download
+
+    mode = verify_mode()
+    notes: list[str] = []
+    expected, source = _expected_sha256(
+        meta, f"{_TORCH_REL_BASE}/{meta['zip']}", meta["zip"], notes)
+    if not expected:
+        log_download(f"WARN 组件校验跳过：{flavor} 拿不到期望 sha256"
+                     f"（{'；'.join(notes)}；mode={mode}）")
+        return
+    try:
+        got = sha256_file(zip_path)
+    except OSError as e:
+        log_download(f"WARN 组件校验跳过：{flavor} 计算 sha256 失败"
+                     f"（{e}；mode={mode}）")
+        return
+    if got == expected:
+        log_download(f"组件校验通过：{flavor} sha256={got}"
+                     f"（source={source}, mode={mode}）")
+        return
+
+    detail = f"期望 {expected}（source={source}），实得 {got}"
+    if mode != "strict":
+        log_download(f"WARN 组件 sha256 不匹配：{flavor} {detail}；"
+                     "warn-only，继续安装（mode=warn）")
+        return
+
+    # strict：删除下载产物（zip + 分卷 + 可能的暂存/拼接残档）再抛错
+    candidates = [Path(zip_path)]
+    candidates += [Path(p) for p in parts]
+    candidates += [Path(str(zip_path) + ".part"),
+                   Path(str(zip_path) + ".concat.part")]
+    removed: list[str] = []
+    for p in candidates:
+        try:
+            if p.exists():
+                p.unlink()
+                removed.append(p.name)
+        except OSError:
+            pass
+    log_download(f"组件 sha256 不匹配：{flavor} {detail}；"
+                 f"strict 模式已删除 {removed}（mode=strict）")
+    raise RuntimeError(
+        f"组件包校验失败：{meta['zip']} sha256 不匹配"
+        f"（期望 {expected[:16]}…，实得 {got[:16]}…，来源 {source}）。"
+        "已删除下载文件；请检查网络/镜像后重试。")
+
+
 # ── 推理引擎组件（PyTorch 运行时）：CPU / CUDA 按需下载 ─────────────
 # 安装包本体**不含 torch**（v1.1.2 曾把构建机的 CPU 版 torch 照单打进包，
 # 用户有 N 卡也永远检测不到——issue #3；反过来想，干脆谁都 不带，安装包从
@@ -412,6 +563,9 @@ _TORCH_FLAVORS: dict[str, dict] = {
         "size_mb": 259,
         "label_key": "env.flavor.cpu",
         "desc_key": "env.flavor.cpuDesc",
+        # D5：整包 sha256。发布后从 build_components.py 产出的 `<zip>.sha256`
+        # 回填到这里（可选）；空串 = 交给远端 .sha256 / manifest.json 兜底。
+        "sha256": "",
     },
     "cu128": {
         "zip": f"ocrmini-runtime-torch{_TORCH_VERSION}-cu128.zip",
@@ -422,6 +576,7 @@ _TORCH_FLAVORS: dict[str, dict] = {
         "parts": 2,
         "label_key": "env.flavor.cu128",
         "desc_key": "env.flavor.cu128Desc",
+        "sha256": "",
     },
 }
 
@@ -602,7 +757,11 @@ def _extract_zip_checked(zip_path: Path, dest: Path,
 
 def download_torch(flavor: str, progress_cb=None, cancel_check=None,
                    force: bool = False) -> dict:
-    """下载并安装推理引擎组件（断点续传下载 → 校验 → 解压 → 安装标记）。
+    """下载并安装推理引擎组件（断点续传下载 → sha256 校验 → 解压 → 安装标记）。
+
+    校验（D5）：解压前对整包做 sha256 比对，期望值优先级 flavor.sha256 →
+    远端 <zip>.sha256 → 远端 manifest.json；默认 warn-only，设
+    OCRMT_VERIFY_RUNTIME=strict 时不一致会删包并抛 RuntimeError。
 
     progress_cb(pct: float, msg: str)（0~1，下载段占 0~0.9、解压段 0.9~1）。
     已装同版本同 flavor 时直接返回标记（force=True 强制重装）。
@@ -622,6 +781,7 @@ def download_torch(flavor: str, progress_cb=None, cancel_check=None,
     url = f"{_TORCH_REL_BASE}/{meta['zip']}"
     final_zip = RUNTIME_DIR / meta["zip"]
     n_parts = meta.get("parts", 1)
+    downloaded_parts: list[Path] = []
 
     if n_parts == 1:
         # 单文件：.part 断点续传，完成后改正式名
@@ -679,6 +839,7 @@ def download_torch(flavor: str, progress_cb=None, cancel_check=None,
                            if (progress_cb and total) else None,
                            cancel_check=cancel_check)
             part_files.append(pdest)
+        downloaded_parts = list(part_files)
         concat = RUNTIME_DIR / (meta["zip"] + ".concat.part")
         if progress_cb:
             progress_cb(0.9, tr("env.concatProgress"))
@@ -704,6 +865,10 @@ def download_torch(flavor: str, progress_cb=None, cancel_check=None,
             except OSError:
                 pass
     zip_path = final_zip
+
+    # D5：解压前做整包 sha256 校验（分卷此时已拼接成 final_zip，与发布产物一致）。
+    # 默认 warn-only；OCRMT_VERIFY_RUNTIME=strict 才会删包抛错。
+    _verify_zip_sha256(flavor, zip_path, meta, downloaded_parts)
 
     if progress_cb:
         progress_cb(0.9, tr("env.extractProgress"))

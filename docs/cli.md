@@ -96,7 +96,14 @@ python）。不要 `cd` 到别的目录再调用相对路径的 `cli.py`——�
   "results": [
     {
       "source": "D:/scans/a.png",
-      "pages": [{"page": 1, "markdown": "# 标题\n\n正文"}],
+      "pages": [{"page": 1, "markdown": "# 标题\n\n正文",
+                 "blocks": [{"type": "paragraph", "label": "正文",
+                             "level": 0, "bbox": [96, 120, 1600, 320],
+                             "text": "正文", "mergePrev": false}]}],
+      "blocks": [{"page": 1,
+                  "blocks": [{"type": "text", "label": "text", "level": null,
+                              "bbox": [96, 120, 1600, 320],
+                              "text": "正文", "mergePrev": false}]}],
       "elapsed": 1.234,
       "truncated": false,
       "pagesMismatch": false,
@@ -108,7 +115,8 @@ python）。不要 `cd` 到别的目录再调用相对路径的 `cli.py`——�
   "summary": {"total": 1, "ok": 1, "failed": 0, "elapsed": 1.234},
   "error": null,
   "source": "D:/scans/a.png",
-  "pages": [{"page": 1, "markdown": "# 标题\n\n正文"}],
+  "pages": [{"page": 1, "markdown": "# 标题\n\n正文", "blocks": []}],
+  "blocks": [{"page": 1, "blocks": []}],
   "truncated": false,
   "pagesMismatch": false
 }
@@ -122,6 +130,56 @@ python）。不要 `cd` 到别的目录再调用相对路径的 `cli.py`——�
 - `groups`：引擎实际分组数（`int`；未分组=1，CLI 侧分块时是各次之和；旧引擎缺该字段时为 `0`）。
 - **`--json` 且没给 `--format` 时不落盘**（纯管道模式）；给了 `--format` 则既写文件
   也在 stdout 输出 JSON。
+
+#### JSON schema：`pages` → `blocks`（E2）
+
+`blocks` 是引擎返回的**版面块**，供下游做结构化处理（表格重建、版面分析、坐标定位）。
+两个视图是同一份数据：
+
+| 位置 | 形态 | 说明 |
+|---|---|---|
+| `results[].blocks` / 顶层 `blocks` | `[{"page": n, "blocks": [block, ...]}]` | **与 HTTP/GUI 完全同构**的页信封；`page` 是原页号（`--pages` 时可能不是 1..n），引擎没给 `blocks` 时为 `[]` |
+| `results[].pages[].blocks` | `[block, ...]` | 该页的块列表（同一数据的页面视图） |
+
+> 三处出口（CLI `--json` / HTTP `POST /api/recognize` / GUI 落盘 `.json`）的
+> `blocks` 现在**同构**：都是页信封数组，块内容、顺序与页号完全一致。
+
+单个 `block` 的字段（**全部由引擎产出，CLI 原样透传**）：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `type` | string | 归一后的块类型（如 `text` / `title` / `table` / `header` / `footer` / `page_number` / `equation` …） |
+| `label` | string | 模型原始标签（小写原值，如 `image_caption`；`__raw__` 段落在 `type` 里归为 `text`） |
+| `level` | int \| null | 层级（标题级别等；无层级为 `null`） |
+| `bbox` | `[x1, y1, x2, y2]` \| null | **模型原始像素坐标**（相对该页图像，左上原点；不随 `--pages`/dpi 换算；模型未给则为 `null`） |
+| `text` | string | 该块渲染出的文本片段（Markdown 子串，与页面 Markdown 同口径） |
+| `mergePrev` | bool | 该块是否属于与上一块合并的行（列合并/跨页链的头块为 `false`） |
+
+- **旧引擎没有 `blocks`** 时：`results[].blocks` 为 `[]`、`pages[].blocks` 为 `[]`
+  （结构稳定，下游不用判断字段是否存在）。
+- `--format json` 落盘的 `.json` 与 `--json` 的**单个 item 完全同 schema**
+  （都是 `_json_item()` 的产物），可以互换消费。
+- GUI 设置「输出格式 = JSON」时，`outputs/<名字>.json` 用的是同一套**页信封**
+  （`pages: [{page, blocks}]`），只是外壳换成 `{version, name, pages}`。
+
+GUI 的 `.json` 文件结构（`outFormat = json`，写入 `outputs/<名字>.json`）：
+
+```json
+{
+  "version": 1,
+  "name": "扫描件 2024",
+  "pages": [
+    {"page": 1, "blocks": [{"type": "text", "label": "text", "level": null,
+                            "bbox": [96, 120, 1600, 320],
+                            "text": "正文", "mergePrev": false}]}
+  ]
+}
+```
+
+`version` 是 schema 版本（当前 `1`），升级时只增不改；`name` 是净化后的结果名
+（与文件名 stem 一致）；`pages[].page` 是**引擎给的页号**（本次导出的页序，从 1 起
+连续；`pdfPageRange` 生效后相对选中页；整页块被 `dropHeaders` 清空时该页不出现在
+`pages` 里）。落盘同样是「原子写 + 同名递增（`名 (1).json`）+ 崩溃不留半截文件」。
 
 ### 3.3 进度与日志
 

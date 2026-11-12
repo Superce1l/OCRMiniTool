@@ -30,12 +30,29 @@ from pathlib import Path
 
 from downloader import RUNTIME_DIR, installed_torch_info, quick_check
 from i18n import tr
-from ocr_postprocess import PAGE_SPLIT_RE, to_gui_markdown_with_stats
+from ocr_postprocess import (PAGE_SPLIT_RE, build_document,
+                            to_gui_markdown_with_stats)
 from page_range import parse_pages as _parse_page_spec
 
 DEFAULT_PROMPT = "Multi page parsing."   # 上游 vLLM 部署的默认指令
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+
+
+def _build_blocks(raw_text: str, *, page_base: int, drop_headers: bool):
+    """调后处理 build_document 产出结构化 blocks（E2）。
+
+    结构化区块是**附加**信息：解析失败只丢 blocks，绝不让整次识别失败。
+    """
+    try:
+        doc = build_document(raw_text, page_base=page_base,
+                             drop_headers=bool(drop_headers))
+        if isinstance(doc, dict) and isinstance(doc.get("pages"), list):
+            return doc
+    except Exception as e:
+        from applog import log_error
+        log_error("build_document 失败（本次 blocks 置空）", exc=e)
+    return {"pages": []}
 
 
 def _render_with_stats(raw_text: str, *, drop_headers: bool,
@@ -1057,6 +1074,11 @@ class OcrEngine:
           droppedBlocks   被 drop_headers 丢弃的版面块数
           tableWarnings   后处理发现的表格问题数（各组之和；E12/E14 同批）
           effectiveMaxNewTokens 本次请求实际用的生成上限（None=模型默认）
+          blocks          E2 结构化页/块：`[{page, blocks:[{type,label,level,
+                         bbox,text,mergePrev}]}]`，跨组汇总、页号连续。
+                         页号是**本次导出的页序**（page_range 生效后从 1 起），
+                         text 为渲染片段；被 drop_headers 丢掉的块不出现，
+                         整页被丢空则不出现在 pages 里。
         """
         if not self.ready:
             raise EngineError(tr("err.notLoaded"))
@@ -1079,6 +1101,8 @@ class OcrEngine:
         group_stats: list[dict] = []
         dropped_total = 0
         table_warnings_total = 0
+        blocks_pages: list[dict] = []     # E2：跨组汇总的结构化页/块
+        blocks_cursor = 0                 # 已处理页数（下一组 page_base = +1）
         total_groups = 1
         effective_new = None
         # 流式钩子：识别期间 on_finalized_text 会累计字数并检查取消
@@ -1163,6 +1187,11 @@ class OcrEngine:
                             results.append(md)
                             dropped_total += dropped
                     groups_done += 1
+                    # E2：复用本组 raw_text 产出结构化 blocks（不重复跑后处理）
+                    doc = _build_blocks(text, page_base=blocks_cursor + 1,
+                                        drop_headers=want_drop)
+                    blocks_pages.extend(doc.get("pages") or [])
+                    blocks_cursor += len(group)
                     if progress_cb:
                         progress_cb(tr("prog.recognizeDone"), groups_done,
                                     total_groups, time.time() - t0)
@@ -1209,6 +1238,8 @@ class OcrEngine:
             "effectiveMaxNewTokens": effective_new,
             # E12 / E14：后处理（join_lines / cjk_spacing）发现的表格问题总数
             "tableWarnings": table_warnings_total,
+            # E2：结构化页/块（跨组汇总；页号从 1 起连续，组内按输入页序）
+            "blocks": blocks_pages,
         }
 
     def _infer(self, images: list[Path], prompt: str, crop_mode=None,

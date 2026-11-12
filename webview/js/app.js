@@ -874,6 +874,9 @@ function showResult(result) {
   $(".md-wrap").hidden = false;
   renderResultWarn(resultWarnLines(result));
   showResultPages();
+  // E17：新结果到来 → 清空上一次的查找词，工具栏随结果出现
+  showFindBar(true);
+  resetFind(true);
 }
 
 function renderResultText() {
@@ -900,6 +903,7 @@ function renderResultText() {
     box.innerHTML = mdToHtml(text);
   }
   updateEditedChip();
+  updateFindInfo();   // E17：切页/换结果后重新计算匹配计数
 }
 
 /* ── B9 结果可编辑：编辑只落在「当前页」（单页即唯一页）上 ──────────
@@ -953,7 +957,11 @@ function applyResultEdit(value) {
   updateEditedChip();
   updateResultMeta();
 }
-$("#md-raw").addEventListener("input", e => applyResultEdit(e.target.value));
+$("#md-raw").addEventListener("input", e => {
+  applyResultEdit(e.target.value);
+  findState.index = -1;     // E17：手改后旧匹配位置作废，重新计数
+  updateFindInfo();
+});
 
 /* ── 批量模式：逐文件结果 ─────────────────────────────────── */
 function firstLine(s) {
@@ -1022,6 +1030,7 @@ function viewBatchItem(i) {
     $("#btn-copy").disabled = true;
     $("#btn-save").disabled = true;
     $("#result-edited").hidden = true;   // B9：失败项没有可编辑正文
+    showFindBar(false);                  // E17：无正文可查找
     showBatchError(it);
     return;
   }
@@ -1034,9 +1043,13 @@ function viewBatchItem(i) {
     truncated: !!it.truncated, pagesMismatch: !!it.pagesMismatch,
     finishReason: it.finishReason || it.finish_reason || "",
     edited: !!it.edited,
+    blocks: it.blocks,                  // E2：JSON 导出需要当前条目的结构化块
   };
   state.curPage = 0;
   showResultPages();
+  // E17：切换批量条目 → 保留查找词，按新条目重新计数
+  showFindBar(true);
+  resetFind(false);
 }
 
 /* 复用 showResult 的分页/渲染部分（不重置批量列表） */
@@ -1077,6 +1090,176 @@ $("#result-mode").addEventListener("click", e => {
   $$("#result-mode button").forEach(x => x.classList.toggle("on", x === b));
   renderResultText();
 });
+
+/* ── E17 结果内查找/替换 ────────────────────────────────────
+   作用范围：逐页视图（多页且 curPage>=0）只作用于当前页；单页/整篇作用于整篇。
+   写入统一走 applyResultEdit()，因此自动触发「已编辑」chip 与批量同步。
+   多页「全部」视图是合并内容（B9 只读），只允许定位、不允许替换。 */
+const findState = { index: -1 };
+function findQuery() {
+  const el = $("#find-text");
+  return el ? el.value : "";
+}
+function findTarget() {
+  const r = state.lastResult;
+  if (!r) return null;
+  const pages = Array.isArray(r.pages) ? r.pages : [];
+  const multi = pages.length > 1;
+  const perPage = multi && state.curPage >= 0;
+  return {
+    r,
+    pages,
+    multi,
+    perPage,
+    text: perPage ? (pages[state.curPage] || "") : (r.text || ""),
+    editable: !(multi && state.curPage === -1),
+  };
+}
+function findMatches(text, query) {
+  const out = [];
+  if (!text || !query) return out;
+  let at = text.indexOf(query);
+  while (at >= 0) {
+    out.push(at);
+    at = text.indexOf(query, at + query.length);
+  }
+  return out;
+}
+function showFindBar(show) {
+  const bar = $("#find-bar");
+  if (bar) bar.hidden = !show;
+}
+function syncFindButtons() {
+  const target = findTarget();
+  const hasQuery = findQuery().length > 0;
+  const canEdit = !!(target && target.editable);
+  ["#find-prev", "#find-next"].forEach(sel => {
+    const el = $(sel);
+    if (el) el.disabled = !hasQuery;
+  });
+  ["#find-replace", "#find-replace-all"].forEach(sel => {
+    const el = $(sel);
+    if (el) el.disabled = !hasQuery || !canEdit;
+  });
+}
+function updateFindInfo() {
+  const info = $("#find-info");
+  if (!info) return;
+  const target = findTarget();
+  const q = findQuery();
+  if (!target || !q) {
+    info.textContent = "";
+    findState.index = -1;
+    syncFindButtons();
+    return;
+  }
+  const matches = findMatches(target.text, q);
+  if (!matches.length) {
+    info.textContent = t("msg.noMatch");
+    findState.index = -1;
+    syncFindButtons();
+    return;
+  }
+  if (findState.index < 0 || findState.index >= matches.length) findState.index = 0;
+  info.textContent = t("result.matchInfo", { i: findState.index + 1, n: matches.length });
+  syncFindButtons();
+}
+function ensureRawMode() {
+  if (state.resultMode === "raw") return;
+  state.resultMode = "raw";
+  $$("#result-mode button").forEach(x => x.classList.toggle("on", x.dataset.v === "raw"));
+  renderResultText();
+}
+function focusFindMatch() {
+  const target = findTarget();
+  const q = findQuery();
+  if (!target || !q) return false;
+  const matches = findMatches(target.text, q);
+  if (!matches.length) {
+    findState.index = -1;
+    updateFindInfo();
+    flash(t("msg.noMatch"));
+    return false;
+  }
+  if (findState.index < 0 || findState.index >= matches.length) findState.index = 0;
+  ensureRawMode();   // 渲染视图里没有可寻址的文本节点：切到原文精确定位
+  const raw = $("#md-raw");
+  const at = matches[findState.index];
+  if (raw) {
+    raw.focus();
+    try { raw.setSelectionRange(at, at + q.length); } catch { /* 不支持的场景忽略 */ }
+  }
+  updateFindInfo();
+  return true;
+}
+function findNext(step) {
+  const target = findTarget();
+  const q = findQuery();
+  if (!target || !q) return;
+  const matches = findMatches(target.text, q);
+  if (!matches.length) {
+    findState.index = -1;
+    updateFindInfo();
+    flash(t("msg.noMatch"));
+    return;
+  }
+  if (findState.index < 0) findState.index = step > 0 ? 0 : matches.length - 1;
+  else findState.index = (findState.index + step + matches.length) % matches.length;
+  focusFindMatch();
+}
+function resetFind(clearQuery) {
+  findState.index = -1;
+  if (clearQuery) {
+    const el = $("#find-text");
+    if (el) el.value = "";
+  }
+  updateFindInfo();
+}
+function replaceCurrentMatch() {
+  const target = findTarget();
+  const q = findQuery();
+  if (!target || !q) return;
+  if (!target.editable) { flash(t("result.editAllHint")); return; }
+  const at = target.text.indexOf(q);
+  if (at < 0) { updateFindInfo(); flash(t("msg.noMatch")); return; }
+  const rw = $("#replace-text").value;
+  applyResultEdit(target.text.slice(0, at) + rw + target.text.slice(at + q.length));
+  renderResultText();
+  findState.index = -1;
+  updateFindInfo();
+  flash(t("msg.replaced", { n: 1 }));
+}
+function replaceAllMatches() {
+  const target = findTarget();
+  const q = findQuery();
+  if (!target || !q) return;
+  if (!target.editable) { flash(t("result.editAllHint")); return; }
+  const parts = target.text.split(q);
+  const n = parts.length - 1;
+  if (n <= 0) { updateFindInfo(); flash(t("msg.noMatch")); return; }
+  const rw = $("#replace-text").value;
+  applyResultEdit(parts.join(rw));
+  renderResultText();
+  findState.index = -1;
+  updateFindInfo();
+  flash(t("msg.replaced", { n }));
+}
+$("#find-text").addEventListener("input", () => { findState.index = -1; updateFindInfo(); });
+$("#find-text").addEventListener("keydown", e => {
+  if (e.ctrlKey || e.metaKey) return;       // Ctrl+Enter 交给全局「开始识别」
+  if (e.key === "Enter") { e.preventDefault(); findNext(e.shiftKey ? -1 : 1); }
+  else if (e.key === "Escape") { e.preventDefault(); showFindBar(false); }
+});
+$("#replace-text").addEventListener("keydown", e => {
+  if (e.ctrlKey || e.metaKey) return;
+  if (e.key === "Enter") { e.preventDefault(); replaceCurrentMatch(); }
+  else if (e.key === "Escape") { e.preventDefault(); showFindBar(false); }
+});
+$("#find-next").addEventListener("click", () => findNext(1));
+$("#find-prev").addEventListener("click", () => findNext(-1));
+$("#find-replace").addEventListener("click", replaceCurrentMatch);
+$("#find-replace-all").addEventListener("click", replaceAllMatches);
+syncFindButtons();
 
 /* ── B8 批量失败项重试（S4）：只重跑失败的文件，成功后替换该项 ── */
 function findSourceForItem(name, usedFiles, usedPaths, sourceKind) {
@@ -1190,24 +1373,41 @@ function mdToPlain(md) {
     .trim();
 }
 
+function downloadBlob(blob, filename) {
+  const a = $("#download-link");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
 $("#btn-save").addEventListener("click", () => {
   const r = state.lastResult;
   if (!r) return;
+  const outFormat = String((state.settings && state.settings.outFormat) || "md").toLowerCase();
   const text = state.curPage >= 0 && (r.pages || []).length > 1
     ? r.pages[state.curPage] : r.text;
-  const fmt = (state.settings && state.settings.outFormat) === "txt" ? "txt" : "md";
+  const rawBase = (r.outPath ? String(r.outPath).split(/[\\/]/).pop() : "ocr-result") || "ocr-result";
+  const stem = rawBase.replace(/\.(md|txt|json)$/i, "") || "ocr-result";
   try {
+    if (outFormat === "json") {
+      // E2：结构化导出，schema 与后端落盘 .json 完全一致：
+      // {"version":1,"name":<stem>,"pages":[{page,blocks:[…]}, …]}
+      // blocks 由后端/引擎给出；历史文件与旧结果没有结构化数据 → 明确提示，不导出空文件
+      if (!Array.isArray(r.blocks) || !r.blocks.length) {
+        flashError(t("result.jsonUnavailable"));
+        return;
+      }
+      const payload = { version: 1, name: stem, pages: r.blocks };
+      downloadBlob(new Blob([JSON.stringify(payload, null, 2)],
+        { type: "application/json;charset=utf-8" }), stem + ".json");
+      return;
+    }
+    const fmt = outFormat === "txt" ? "txt" : "md";
     const content = fmt === "txt" ? mdToPlain(text) : text;
-    const base = (r.outPath ? r.outPath.split(/[\\/]/).pop() : "ocr-result")
-      || "ocr-result";
-    const blob = new Blob([content], {
+    downloadBlob(new Blob([content], {
       type: fmt === "txt" ? "text/plain;charset=utf-8" : "text/markdown;charset=utf-8",
-    });
-    const a = $("#download-link");
-    a.href = URL.createObjectURL(blob);
-    a.download = base.replace(/\.(md|txt)$/i, "") + "." + fmt;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    }), stem + "." + fmt);
   } catch (e) {
     flashError(t("msg.genericFailed", { err: e.message || e }));
   }

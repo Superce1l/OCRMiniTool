@@ -468,12 +468,29 @@ def _merge_page_results(parts: list[tuple[dict, list[tuple[int, Path]]]],
     truncated = False
     mismatch = False
     groups = 0
+    all_blocks: list[dict] = []
+    saw_blocks = False
     for res, page_items in parts:
         res = res if isinstance(res, dict) else {}
         md_pages = res.get("pages")
         if not isinstance(md_pages, list):
             text = res.get("text") or ""
             md_pages = [text] if text else []
+        blocks_raw = res.get("blocks")
+        if not isinstance(blocks_raw, list):
+            blocks_raw = []
+        if blocks_raw:
+            saw_blocks = True
+        if blocks_raw and all(isinstance(b, dict) for b in blocks_raw):
+            if any("blocks" in b for b in blocks_raw):
+                # 引擎页信封形态 [{page, blocks:[…]}]（E2 的真实形态）
+                blocks_by_page = [list(env.get("blocks") or [])
+                                  for env in blocks_raw]
+            else:
+                blocks_by_page = [blocks_raw]        # 单页扁平写法
+        else:
+            blocks_by_page = [p if isinstance(p, list) else []
+                              for p in blocks_raw]
         elapsed += float(res.get("elapsed") or 0.0)
         truncated = truncated or bool(res.get("truncated"))
         mismatch = mismatch or bool(res.get("pagesMismatch"))
@@ -482,13 +499,23 @@ def _merge_page_results(parts: list[tuple[dict, list[tuple[int, Path]]]],
             mismatch = True
         for i, md in enumerate(md_pages):
             number = page_items[i][0] if i < len(page_items) else len(pages) + 1
-            pages.append({"page": number, "markdown": md if isinstance(md, str) else str(md)})
+            page_blocks = blocks_by_page[i] if i < len(blocks_by_page) else []
+            pages.append({"page": number,
+                          "markdown": md if isinstance(md, str) else str(md),
+                          "blocks": page_blocks})
+            # 与 HTTP/GUI 同一外壳：`blocks` 是页信封 [{page, blocks}]，
+            # 页码沿用原页号（--pages 时可能不是 1..n），下游无需按页数猜。
+            all_blocks.append({"page": number, "blocks": page_blocks})
     if want_pages and len(pages) != want_pages:
         # 引擎没自报 pagesMismatch 时，用期望页数兜一层（防旧引擎）
         mismatch = mismatch or len(pages) < want_pages
-    return {"pages": pages, "elapsed": elapsed, "truncated": truncated,
-            "pagesMismatch": mismatch, "groups": groups,
-            "expectedPages": want_pages or len(pages)}
+    merged = {"pages": pages, "elapsed": elapsed, "truncated": truncated,
+              "pagesMismatch": mismatch, "groups": groups,
+              "expectedPages": want_pages or len(pages)}
+    if saw_blocks:
+        # 引擎给了 blocks 才带（旧引擎缺省不带，JSON 输出 [] 由 _json_item 兜）
+        merged["blocks"] = all_blocks
+    return merged
 
 
 def _recognize_file(engine, path: Path, args, caps: set[str], lang: str,
@@ -604,11 +631,47 @@ def _write_output(out_dir: Path, source: Path, fmt: str, result: dict) -> Path:
     return target
 
 
+def _json_blocks(result: dict) -> list[dict]:
+    """把结果里的 blocks 归一成与 HTTP/GUI 相同的外壳 `[{page, blocks}]`。
+
+    引擎真实形态就是页信封；这里同时兼容三种旧/简化写法，保证 CLI 的
+    JSON 契约稳定：
+      • `[{page, blocks}]`       → 原样（页码非 1..n 时保留原页号）
+      • `[[block, …], …]`        → 每页一个块列表，页号按下标 1..n
+      • `[block, …]`             → 单页扁平块列表，归到第 1 页
+      • 缺省/非 list             → []
+    """
+    raw = result.get("blocks") if isinstance(result, dict) else None
+    if not isinstance(raw, list) or not raw:
+        return []
+    if all(isinstance(b, dict) for b in raw):
+        if any("blocks" in b for b in raw):
+            out = []
+            for idx, env in enumerate(raw):
+                try:
+                    num = int(env.get("page"))
+                except (TypeError, ValueError):
+                    num = idx + 1
+                blocks = env.get("blocks")
+                out.append({"page": num,
+                            "blocks": list(blocks) if isinstance(blocks, list) else []})
+            return out
+        return [{"page": 1, "blocks": list(raw)}]
+    return [{"page": i + 1,
+             "blocks": list(p) if isinstance(p, (list, tuple)) else []}
+            for i, p in enumerate(raw)]
+
+
 def _json_item(result: dict) -> dict:
-    """单份结果的 JSON 契约（新增引擎字段一律防御式读取）。"""
+    """单份结果的 JSON 契约（新增引擎字段一律防御式读取）。
+
+    `blocks`（E2）与 HTTP/GUI 落盘同构：`[{page, blocks:[{type,label,level,
+    bbox,text,mergePrev}]}]`。旧引擎没有该字段时输出 []（结构稳定）。
+    """
     return {
         "source": result.get("source", ""),
         "pages": result.get("pages") or [],
+        "blocks": _json_blocks(result),
         "elapsed": round(float(result.get("elapsed") or 0.0), 3),
         "truncated": bool(result.get("truncated")),
         "pagesMismatch": bool(result.get("pagesMismatch")),

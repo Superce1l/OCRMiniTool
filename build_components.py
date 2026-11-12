@@ -12,8 +12,17 @@ GitHub Release（tag 必须与 downloader._TORCH_TAG 一致，如 runtime-torch2
   uv run python build_components.py cpu        # 只做 CPU
   uv run python build_components.py cu128      # 只做 CUDA
 
-产物：dist_components/*.zip + dist_components/manifest.json（大小/sha256，
-发布 Release 时把 zip 传上去即可；downloader 按文件名拼 URL 并断点续传）。
+产物（dist_components/）：
+  *.zip              组件包本体
+  manifest.json      每个 zip 的 flavor/torch/size/sha256（downloader 的哈希来源③）
+  <zip>.sha256       "<hex>  <文件名>"（downloader 的哈希来源②）
+  SHA256SUMS         所有 zip + manifest.json 的 sha256 清单
+
+发布 Release（tag 与 downloader._TORCH_TAG 一致）时上传：
+  - 各 flavor 的 zip；cu128 超过 GitHub 单资产 2GB 上限，按 1900 MiB 切成
+    `<zip>.part01-of-2` / `<zip>.part02-of-2` 两卷上传
+  - `<zip>.sha256`、`SHA256SUMS`、`manifest.json`（三者都是可选的校验来源，
+    但建议全传：应用会在解压前按优先级挑一个核验整包 sha256）
 """
 from __future__ import annotations
 
@@ -86,6 +95,33 @@ def sha256_of(p: Path) -> str:
     return h.hexdigest()
 
 
+def write_sidecars(out_dir: Path, manifest: dict) -> list[Path]:
+    """为每个已有 zip 写 `<zip>.sha256`，并写 SHA256SUMS（含 manifest.json）。
+
+    manifest 结构保持不变（顶层按 zip 名索引），只额外产出旁路文件；
+    downloader 的期望哈希来源②/③ 直接吃这两个产物。
+    """
+    out_dir = Path(out_dir)
+    written: list[Path] = []
+    for name in sorted(manifest):
+        zpath = out_dir / name
+        sha = (manifest[name] or {}).get("sha256") or ""
+        if zpath.is_file() and sha:
+            p = out_dir / (name + ".sha256")
+            p.write_text(f"{sha}  {name}\n", encoding="utf-8")
+            written.append(p)
+    lines = [f"{manifest[name]['sha256']}  {name}"
+             for name in sorted(manifest)
+             if (out_dir / name).is_file() and manifest[name].get("sha256")]
+    man = out_dir / "manifest.json"
+    if man.is_file():
+        lines.append(f"{sha256_of(man)}  manifest.json")
+    sums = out_dir / "SHA256SUMS"
+    sums.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    written.append(sums)
+    return written
+
+
 def main():
     wants = sys.argv[1:] or ["cpu", "cu128"]
     bad = [w for w in wants if w not in ("cpu", "cu128")]
@@ -105,10 +141,27 @@ def main():
         print(f"[{flavor}] {size / 1_048_576:.0f} MB  sha256={manifest[out.name]['sha256'][:16]}…")
     (OUT_DIR / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    sidecars = write_sidecars(OUT_DIR, manifest)
     print(f"manifest → {OUT_DIR / 'manifest.json'}")
-    print("发布：GitHub Release tag 为 downloader._TORCH_TAG（"
-          f"runtime-torch{TORCH_VER}），上传全部 zip 即可。")
+    for p in sidecars:
+        print(f"校验清单 → {p}")
+    print(f"发布：GitHub Release tag 为 downloader._TORCH_TAG（"
+          f"runtime-torch{TORCH_VER}），上传以下资产：")
+    print("  - *.zip（cu128 按 1900 MiB 切成 .part01-of-2 / .part02-of-2 两卷）")
+    print("  - <zip>.sha256、SHA256SUMS、manifest.json（校验来源②/③）")
+
+
+def _print_help() -> None:
+    print(__doc__.strip())
+    print("\n当前参数：")
+    print("  （无参数）   同时构建 cpu 与 cu128")
+    print("  cpu          只构建 CPU 组件")
+    print("  cu128        只构建 CUDA 12.8 组件")
+    print("  -h, --help   显示本帮助")
 
 
 if __name__ == "__main__":
+    if any(a in ("-h", "--help") for a in sys.argv[1:]):
+        _print_help()
+        raise SystemExit(0)
     main()

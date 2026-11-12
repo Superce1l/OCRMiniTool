@@ -253,45 +253,72 @@ def _merge_table_fragments(frags):
     return merged + ('\n\n' + '\n\n'.join(extra) if extra else '')
 
 
-def _render_blocks(blocks, groups, drop_headers=False, stats=None):
-    """Render each group to a Markdown item (figure/table/heading/text).
+def _strip_outer_fence(text):
+    """去掉模型输出偶尔带的 ```markdown 外层围栏（convert 与 build_document 共用）。"""
+    text = (text or '').strip()
+    if text.startswith('```markdown'):
+        text = text[len('```markdown'):].strip()
+    if text.endswith('```'):
+        text = text[:-3].strip()
+    return text
 
-    drop_headers: True 时丢弃 header/footer/page_number 三类块（E11），
-                  命中数累加进 stats['droppedBlocks']。
+
+def _render_group(blocks, members, drop_headers=False, stats=None):
+    """把一个渲染组转成 {text,label,type,level,bbox,mergePrev}；丢弃/空 → None。
+
+    这是 Markdown 渲染与结构化 blocks 的**唯一**事实来源：`_render_blocks`
+    只取 text，`build_document` 取全部字段——两者因此不可能各自漂移。
     """
-    items = []
+    head = blocks[members[0]]
+    label = head['label']
+    base = label if label == '__raw__' else _base_type(label)
+    contents = [blocks[k]['content'] for k in members
+                if blocks[k]['content'] and blocks[k]['content'].lower() not in NOISE_CONTENT]
+    text = None
+    type_name = 'text' if base == '__raw__' else base
+    if base == '__raw__':
+        if contents:
+            text = contents[0]
+    elif base in IMAGE_LABELS:
+        if contents:
+            text = contents[0]
+    elif not contents or base in DROP_LABELS:
+        return None
+    elif drop_headers and base in DROP_LABELS_OPT_IN:
+        # E11：页眉/页脚/页码——只在调用方显式要求时丢，且计入统计
+        if stats is not None:
+            stats['droppedBlocks'] = stats.get('droppedBlocks', 0) + 1
+        return None
+    elif base == 'title':
+        lv = max(1, head['level'] or 1)
+        joined = ''.join(contents)
+        if not STRAY_TOKEN_RE.sub('', joined).strip():
+            return None
+        text = f'{"#" * lv} {joined}'
+    elif base == 'table':
+        text = _merge_table_fragments(contents) if len(contents) > 1 else contents[0]
+    else:
+        text = ''.join(contents)          # text family: concatenate, no separator
+    if text is None:
+        return None
+    bbox = head.get('bbox')
+    return {'text': text,
+            'label': label,
+            'type': type_name,
+            'level': head.get('level'),
+            'bbox': list(bbox) if bbox else None,
+            # 组内任一成员带 <MERGE> 就算「该块由列合并而来」
+            'mergePrev': any(bool(blocks[k].get('merge_prev')) for k in members)}
+
+
+def _render_blocks(blocks, groups, drop_headers=False, stats=None):
+    """Render each group to a Markdown item (figure/table/heading/text)."""
+    out = []
     for members in groups:
-        head = blocks[members[0]]
-        base = head['label'] if head['label'] == '__raw__' else _base_type(head['label'])
-        contents = [blocks[k]['content'] for k in members
-                    if blocks[k]['content'] and blocks[k]['content'].lower() not in NOISE_CONTENT]
-        if base == '__raw__':
-            if contents:
-                items.append(contents[0])
-            continue
-        if base in IMAGE_LABELS:
-            if contents:
-                items.append(contents[0])
-            continue
-        if not contents or base in DROP_LABELS:
-            continue
-        if drop_headers and base in DROP_LABELS_OPT_IN:
-            # E11：页眉/页脚/页码——只在调用方显式要求时丢，且计入统计
-            if stats is not None:
-                stats['droppedBlocks'] = stats.get('droppedBlocks', 0) + 1
-            continue
-        if base == 'title':
-            lv = max(1, head['level'] or 1)
-            joined = ''.join(contents)
-            if not STRAY_TOKEN_RE.sub('', joined).strip():
-                continue
-            items.append(f'{"#" * lv} {joined}')
-            continue
-        if base == 'table':
-            items.append(_merge_table_fragments(contents) if len(contents) > 1 else contents[0])
-            continue
-        items.append(''.join(contents))       # text family: concatenate, no separator
-    return items
+        item = _render_group(blocks, members, drop_headers, stats)
+        if item is not None:
+            out.append(item['text'])
+    return out
 
 
 def _head_level(item):
@@ -604,11 +631,7 @@ def _convert_impl(result, drop_headers=False, stats=None,
     if stats is not None:
         stats.setdefault('droppedBlocks', 0)
         stats.setdefault('tableWarnings', 0)
-    text = (result or '').strip()
-    if text.startswith('```markdown'):
-        text = text[len('```markdown'):].strip()
-    if text.endswith('```'):
-        text = text[:-3].strip()
+    text = _strip_outer_fence(result)
 
     blocks = _parse_blocks(text, page_base=1)
     blocks = _merge_adjacent_titles(blocks)
@@ -672,3 +695,55 @@ def to_gui_markdown_with_stats(raw: str, drop_headers=False, join_lines=False,
         page, x1, y1, x2, y2 = m.groups()
         return f'*［图片区域 第{page}页 ({x1},{y1})-({x2},{y2})］*'
     return _IMG_PLACEHOLDER_RE.sub(_img_repl, md), stats
+
+
+def build_document(raw_text, page_base=1, drop_headers=False):
+    """模型原始输出 → 结构化文档 {"pages": [{"page", "blocks": [...]}]}（E2）。
+
+    与 Markdown 渲染共用同一条管线：`_parse_blocks` → `_merge_adjacent_titles`
+    → `_build_groups` → `_render_group`。因此 blocks 的顺序就是 Markdown 的
+    阅读序，text 与渲染片段逐字一致（不存在"另写一套解析"导致的漂移）。
+
+    每个 block：{"type": 归一类型（_base_type；__raw__ → "text"）,
+                 "label": 原始小写 label,
+                 "level": int|None（模型原始标题层级）,
+                 "bbox": [x0,y0,x1,y1]|None（模型原始像素坐标）,
+                 "text": 该块的渲染片段（Markdown/HTML）,
+                 "mergePrev": bool（该块是否由 <MERGE> 列合并而来）}
+
+    page_base: 起始绝对页号（引擎按组调用时传「已处理页数+1」）；纯函数，不读
+    全局状态、不写文件。畸形输入降级为「整段一个 text 块」，不抛非预期异常。
+    drop_headers=True 时排除 header/footer/page_number；某页块被清空则该页不
+    出现在 pages 里。
+
+    注：页面级收尾（LaTeX 归一 / 去断行 / 中英空格 / 单根标题收敛 / 尾随 bbox
+    行清理）仍由 convert()/to_gui_markdown() 在**整页文本**上执行；这里的 text
+    是同一渲染片段，因此与最终页面文本在这些页面级步骤上可能差一步。
+    """
+    try:
+        base = max(1, int(page_base))
+    except (TypeError, ValueError):
+        base = 1
+    text = _strip_outer_fence(raw_text)
+    if not text:
+        return {"pages": []}
+    try:
+        blocks = _merge_adjacent_titles(_parse_blocks(text, page_base=base))
+        groups = _build_groups(blocks)
+        pages = {}
+        for members in groups:
+            item = _render_group(blocks, members,
+                                 drop_headers=bool(drop_headers))
+            if item is None:
+                continue
+            page_no = blocks[members[0]]['page']
+            pages.setdefault(page_no, []).append(item)
+        return {"pages": [{"page": p, "blocks": pages[p]}
+                          for p in sorted(pages)]}
+    except Exception:      # 降级：解析异常不拖垮识别，整段当一个 text 块
+        fallback = STRAY_TOKEN_RE.sub('', text).strip()
+        if not fallback:
+            return {"pages": []}
+        return {"pages": [{"page": base, "blocks": [
+            {"type": "text", "label": "__raw__", "level": None,
+             "bbox": None, "text": fallback, "mergePrev": False}]}]}

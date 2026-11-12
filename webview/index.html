@@ -142,6 +142,16 @@
           <div class="batch-error" id="batch-error" hidden></div>
           <!-- 页缩略图 + 分页标签（多页时） -->
           <div class="page-tabs" id="page-tabs" hidden></div>
+          <!-- E17 结果内查找/替换（有结果时显示；作用范围=当前页/整篇） -->
+          <div class="find-bar" id="find-bar" hidden>
+            <input class="input find-input" id="find-text" type="search" data-i18n-placeholder="result.search" data-i18n-aria="result.search" placeholder="Find in result" spellcheck="false">
+            <input class="input find-input" id="replace-text" type="search" data-i18n-placeholder="result.replaceWith" data-i18n-aria="result.replaceWith" placeholder="Replace with" spellcheck="false">
+            <span class="find-info" id="find-info" aria-live="polite"></span>
+            <button class="btn btn-ghost btn-sm" id="find-prev" data-i18n="result.searchPrev">Previous</button>
+            <button class="btn btn-ghost btn-sm" id="find-next" data-i18n="result.searchNext">Next</button>
+            <button class="btn btn-ghost btn-sm" id="find-replace" data-i18n="result.replace">Replace</button>
+            <button class="btn btn-ghost btn-sm" id="find-replace-all" data-i18n="result.replaceAll">Replace all</button>
+          </div>
           <div class="md-wrap">
             <div class="md-views">
               <div class="seg" id="result-mode">
@@ -183,7 +193,7 @@
             <button class="btn btn-primary btn-sm" id="btn-flavor-download" disabled data-i18n="env.download">Download component</button>
           </div>
           <div class="progress" id="flavor-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" data-i18n-aria="aria.progress" hidden style="margin-top:10px">
-            <div class="bar" id="flavor-bar"></div>
+            <div class="bar"><i id="flavor-bar" style="width:0%"></i></div>
             <div class="status" id="flavor-status"></div>
           </div>
         </div>
@@ -231,7 +241,7 @@
           <div class="row"><div class="label"><div class="t" data-i18n="set.device">Inference device</div><div class="d" data-i18n="set.deviceDesc">auto = CUDA when an NVIDIA GPU is present, otherwise CPU</div></div>
             <div class="seg" id="set-device"><button data-v="auto" class="on" data-i18n="set.deviceAuto">Auto</button><button data-v="cuda">CUDA</button><button data-v="cpu">CPU</button></div></div>
           <div class="row"><div class="label"><div class="t" data-i18n="set.outfmt">Output format</div><div class="d" data-i18n="set.outfmtDesc">File format for auto-saved results (the Save button follows it too)</div></div>
-            <div class="seg" id="set-outfmt"><button data-v="md" class="on">Markdown</button><button data-v="txt" data-i18n="set.outfmtTxt">Plain text</button></div></div>
+            <div class="seg" id="set-outfmt"><button data-v="md" class="on">Markdown</button><button data-v="txt" data-i18n="set.outfmtTxt">Plain text</button><button data-v="json" data-i18n="set.outfmtJson">JSON (pages/blocks)</button></div></div>
           <div class="row"><div class="label"><div class="t" data-i18n="set.theme">Appearance</div></div>
             <div class="seg" id="set-theme"><button class="on" data-v="light" data-i18n="set.themeLight">Light</button><button data-v="dark" data-i18n="set.themeDark">Dark</button><button data-v="system" data-i18n="set.themeSystem">Follow system</button></div></div>
           <div class="row"><div class="label"><div class="t" data-i18n="set.scale">UI scale</div><div class="d" data-i18n="set.scaleDesc">Adjust text and control size</div></div>

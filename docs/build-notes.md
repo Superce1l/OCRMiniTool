@@ -405,8 +405,9 @@ Windows 不允许覆盖已加载 DLL。后果：安装失败（`envDownloading` 
 ## 7. 发布前必须补（第二阶段实测后更新）
 
 1. **EXE 版本资源**（`version=` / FileVersion=APP_VERSION）：支持排查与杀软识别。
-2. **组件包整包 sha256 校验**：发布侧已有哈希（CPU `69ec27ad…`、cu128 整包 `6f10c1b7…`），
-   应用侧只对账大小；补齐后才能把「下载完整性」讲圆。
+2. ✅ **组件包整包 sha256 校验（D5 已落地）**：解压前校验整包哈希，默认 warn-only，
+   `OCRMT_VERIFY_RUNTIME=strict` 时删包抛错；发布侧需上传 `<zip>.sha256` / `manifest.json`
+   （否则应用只能 WARN 跳过）。详见 §8。
 3. **`tools/build_exe.py` 接入 CI**（windows runner）：构建 + 最小冒烟（进程/`/api/status`/
    未装组件提示），防止「源码能跑、打包版不能跑」回归。
 4. **独立 `console=True` 的 CLI EXE**（若 CLI 要进发布形态，`docs/cli.md` §6）。
@@ -419,3 +420,78 @@ Windows 不允许覆盖已加载 DLL。后果：安装失败（`envDownloading` 
    或「切换需重启应用」的显式流程（下次启动完成安装）。
 8. **启动顺序（新增）**：`start_load()` 早于 `run_native_window()`，模型/组件就绪时窗口
    推迟到 20 s。建议先建窗口/首帧再自动加载，或延后 500 ms 低优先级触发。
+
+## 8. 组件发布与校验（D5）
+
+推理引擎组件（CPU ≈273 MB / cu128 两卷 ≈3.5 GB）以前只有 Content-Length 一个完整性信号；
+D5 补上**整包 sha256**：下载/分卷拼接完成、**解压之前**校验一次，与发布产物对齐。
+
+### 8.1 发布 Release 要上传什么
+
+tag 与 `downloader._TORCH_TAG` 一致（`runtime-torch<torch 版本>`），资产清单：
+
+| 资产 | 说明 |
+|---|---|
+| `ocrmini-runtime-torch<v>-cpu.zip` | CPU 组件整包 |
+| `ocrmini-runtime-torch<v>-cu128.zip.part01-of-2` / `.part02-of-2` | cu128 超过 GitHub 单资产 2 GB，按 **1900 MiB** 切成两卷；两端拼接即整包 |
+| `<zip>.sha256` | **整包**哈希，`sha256sum` 格式 `<hex>  <文件名>`（应用取第一个 64 位 hex） |
+| `SHA256SUMS` | 所有 zip + `manifest.json` 的哈希清单（人肉核对/发布说明用） |
+| `manifest.json` | `build_components.py` 产出；顶层按 zip 名索引，含 `flavor/torch/torchvision/size/sha256` |
+
+`build_components.py` 现在会自动产出后三个文件（`write_sidecars`），打印上传指引；
+`build_components.py --help` 也写明这套清单。
+
+### 8.2 应用侧期望哈希的来源（优先级从高到低）
+
+1. **`_TORCH_FLAVORS[flavor]["sha256"]`**（`downloader.py`）——发布后把整包哈希回填到这里，
+   离线/断网也能校验；空串 = 不启用该来源。
+2. **远端 `<zip_url>.sha256`**——与 zip 同目录的小文件；缺失/非 hex/网络失败只 WARN。
+3. **远端 `manifest.json`**——兼容两种结构：扁平 `{"<zip名>": {"sha256": …}}`，
+   或 `{"zips": {"<zip名>": {"sha256": …}}}`；同样容错。
+
+三个来源都拿不到 → 记 WARN「拿不到期望 sha256」并**跳过校验**（不阻断安装）。
+
+### 8.3 两种模式
+
+| 模式 | 触发 | 哈希不匹配时的行为 |
+|---|---|---|
+| `warn`（默认） | 不设环境变量 | `log_download` 写 `WARN 组件 sha256 不匹配：<flavor> 期望 …（source=…），实得 …；warn-only，继续安装`，安装继续 |
+| `strict` | `set OCRMT_VERIFY_RUNTIME=strict` | 删除 zip、分卷与 `.part`/`.concat.part` 残档，抛 `RuntimeError("组件包校验失败：<zip> sha256 不匹配…请检查网络/镜像后重试。")`；UI 经现有 `dl.failed` 文案显示，**不解压、不写 marker** |
+
+边界：**拿不到期望值**时 strict 也只 WARN、不删包（不能因为发布侧漏传哈希就毁掉用户的下载）。
+远端哈希端点本进程内失败过一次后会记住（`_REMOTE_HASH_DOWN`），不再反复等网络。
+
+### 8.4 与 D6 分卷续传的关系
+
+校验只读**拼接后的 final zip**（与发布整包一致），不动每卷 `<part>.part` 暂存/HEAD 核对/改名
+逻辑；分卷先拼接、后校验、再解压。因此 D6 的续传修复与本校验互不影响
+（`tests/test_build_downloader_parts.py` 的 12+ 用例保持全绿）。
+
+### 8.5 已发布资产的哈希（可回填）
+
+发布侧已有哈希（与 Release 说明/API asset digest 一致，见
+[04-build-dist.md](explore/04-build-dist.md) §4.4）：
+
+```
+69ec27add77adbf3bf2eb78b00066eb816d8f040cc61c57cbd55b264f2198f09  ocrmini-runtime-torch2.8.0-cpu.zip
+6f10c1b7f907aed7cf217c6d5c3a4833267deda4d79718b8de35649d75990b9c  ocrmini-runtime-torch2.8.0-cu128.zip（两卷拼接后的整包）
+```
+
+回填方式：改 `downloader._TORCH_FLAVORS["cpu"]["sha256"]` / `["cu128"]["sha256"]`，
+或用远端 `.sha256`/`manifest.json` 让应用自动取。发布新组件时用构建机重新算：
+
+```bash
+sha256sum dist_components/ocrmini-runtime-torch<v>-cpu.zip
+cat dist_components/*.part01-of-2 dist_components/*.part02-of-2 > /tmp/cu128.zip
+sha256sum /tmp/cu128.zip
+```
+
+`build_components.py` 生成的 `<zip>.sha256`、`SHA256SUMS` 与发布说明里的哈希是同一批值。
+
+### 8.6 本地验证
+
+```bash
+PY="C:/Users/admin/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/python/python.exe"
+"$PY" tests/run_tests.py test_component_sha256     # 16 例，全本地 http.server，无外网
+"$PY" tests/run_tests.py                          # 全量回归
+```

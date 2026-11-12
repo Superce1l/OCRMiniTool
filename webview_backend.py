@@ -52,7 +52,7 @@ DEFAULT_SETTINGS = {
     "mirror": "",          # HuggingFace 镜像，如 hf-mirror.com
     "devicePref": "auto",  # auto | cuda | cpu
     "torchFlavor": "",     # 推理引擎组件：""=auto(按硬件推荐) | cpu | cu128
-    "outFormat": "md",     # 识别结果保存格式：md | txt
+    "outFormat": "md",     # 识别结果保存格式：md | txt | json
     "theme": "light",
     "scale": 100,
     "lang": "zh",          # 界面语言，默认中文（en | zh；i18n.py / i18n.js）
@@ -76,6 +76,7 @@ MAX_SCAN_DEPTH = 64          # 目录深度硬上限
 MAX_RECOGNIZE_PATHS = 200    # 一次识别允许的路径数上限（与上传链路同量级）
 
 _CROP_MODES = ("auto", "gundam", "base")
+_OUT_FORMATS = ("md", "txt", "json")     # 识别结果落盘格式（E2）
 _ENGINE_GROUP_KWARGS = ("max_page_tokens", "max_merged_pages", "drop_headers",
                         "page_range", "join_lines", "cjk_spacing")
 
@@ -260,6 +261,12 @@ def normalize_settings_patch(patch: dict) -> tuple[dict, dict | None]:
         if v not in _CROP_MODES:
             return {}, _bad_value("cropMode", out["cropMode"])
         out["cropMode"] = v
+    if "outFormat" in out:
+        v = str(out["outFormat"] if out["outFormat"] is not None
+                else "").strip().lower()
+        if v not in _OUT_FORMATS:
+            return {}, _bad_value("outFormat", out["outFormat"])
+        out["outFormat"] = v
     if "dropHeaders" in out:
         v = _as_bool(out["dropHeaders"])
         if v is None:
@@ -934,10 +941,11 @@ class WebBackend:
                 "elapsed": elapsed,
                 "cancelled": False,
             }
-            # 引擎新增的中性字段原样透传（截断/页数不符/分组/丢弃块/表格告警）；
-            # 旧引擎没有这些键就自然缺省，不报错。
+            # 引擎新增的中性字段原样透传（截断/页数不符/分组/丢弃块/表格告警/
+            # 版面块）；旧引擎没有这些键就自然缺省，不报错。
             for key in ("truncated", "pagesMismatch", "finishReason",
-                        "groups", "droppedBlocks", "tokens", "tableWarnings"):
+                        "groups", "droppedBlocks", "tokens", "tableWarnings",
+                        "blocks"):
                 if key in result:
                     payload[key] = result[key]
             # 期望页数 / 实际页数：界面提示条要说清「期望 N 页、实际 M 页」，
@@ -1049,9 +1057,9 @@ class WebBackend:
                             "outPath": str(out_path),
                             "elapsed": result.get("elapsed", 0),
                             "chars": chars}
-                    # 批量条目也带截断/页数不符/表格告警标记（引擎缺省时自然不带）
+                    # 批量条目也带截断/页数不符/表格告警/版面块（缺省自然不带）
                     for key in ("truncated", "pagesMismatch", "finishReason",
-                                "tableWarnings"):
+                                "tableWarnings", "blocks"):
                         if key in result:
                             item[key] = result[key]
                     inf = result.get("infer")
@@ -1142,22 +1150,72 @@ class WebBackend:
         s = re.sub(r"[ \t]+\n", "\n", s)
         return s.strip()
 
+    @staticmethod
+    def _json_pages(result: dict, page_count: int = 0) -> list[dict]:
+        """引擎 `result["blocks"]` → JSON 文件的 `pages` 数组 `[{page, blocks}]`。
+
+        引擎（E2）的真实形态是**页信封**：
+          `[{"page": 1, "blocks": [{type,label,level,bbox,text,mergePrev}...]}, …]`
+        （页号是本次导出的页序、从 1 起连续；整页块被清空时该页不出现）。
+        这里同时兼容简化写法，便于旧引擎/测试桩：
+          • `[[block, …], …]` 每页一个块列表 → 页号按下标 1..n；
+          • `[block, …]` 单页扁平 → 归到第 1 页；
+          • 缺省/非 list → 按 `page_count` 生成空 blocks 的页（旧引擎）。
+        块的字段原样透传，后端不解释、不改写。
+        """
+        raw = result.get("blocks") if isinstance(result, dict) else None
+        out: list[dict] = []
+        if isinstance(raw, list) and raw:
+            if all(isinstance(x, dict) for x in raw):
+                if any("blocks" in x for x in raw):      # 引擎页信封形态
+                    for idx, env in enumerate(raw):
+                        blocks = env.get("blocks")
+                        if not isinstance(blocks, list):
+                            blocks = []
+                        num = env.get("page")
+                        try:
+                            num = int(num)
+                        except (TypeError, ValueError):
+                            num = idx + 1
+                        out.append({"page": num, "blocks": blocks})
+                else:                                    # 单页扁平块列表
+                    out = [{"page": 1, "blocks": list(raw)}]
+            else:                                        # 每页一个块列表
+                out = [{"page": i + 1,
+                        "blocks": list(p) if isinstance(p, (list, tuple))
+                        else []}
+                       for i, p in enumerate(raw)]
+        if not out:
+            out = [{"page": i + 1, "blocks": []}
+                   for i in range(max(0, int(page_count or 0)))]
+        return out
+
     def _save_output(self, name: str, result: dict, fmt: str = "md") -> Path:
-        """识别结果落盘。fmt="md"（默认）或 "txt"（纯文本）。
+        """识别结果落盘。fmt = "md"（默认）/ "txt" / "json"。
 
         先写 `<out>.tmp` 再 os.replace：中途崩溃/被杀不会留下半截结果文件
         （旧实现直接 write_text，断电或 os._exit 会留下截断的 .md）。
+
+        json（E2）结构：
+          {"version": 1, "name": "<净化后的名字>",
+           "pages": [{"page": 1, "blocks": [{...}, ...]}, ...]}
+        blocks 直接来自引擎（原始像素坐标、渲染片段），后端不加工。
         """
         OUTPUT_DIR.mkdir(exist_ok=True)
         name = self._sanitize_name(name)          # 兜底：调用方已净化也不亏
-        ext = "txt" if fmt == "txt" else "md"
+        ext = fmt if fmt in _OUT_FORMATS else "md"
         out = OUTPUT_DIR / f"{name}.{ext}"
         i = 1
         while out.exists():
             out = OUTPUT_DIR / f"{name} ({i}).{ext}"
             i += 1
         pages = result.get("pages") or [result.get("text", "")]
-        if fmt == "txt":
+        if fmt == "json":
+            n_pages = len(result.get("pages") or [])
+            data = {"version": 1, "name": name,
+                    "pages": self._json_pages(result, n_pages)}
+            text = json.dumps(data, ensure_ascii=False, indent=2)
+        elif fmt == "txt":
             lines = [name, ""] if len(pages) > 1 else []
             if len(pages) > 1:
                 for i, p in enumerate(pages):
@@ -1165,6 +1223,7 @@ class WebBackend:
                               self._md_to_plain(p), ""]
             else:
                 lines += [self._md_to_plain(pages[0]), ""]
+            text = "\n".join(lines)
         else:
             lines = [f"# {name}", ""]
             if len(pages) > 1:
@@ -1172,9 +1231,10 @@ class WebBackend:
                     lines += [tr("out.pageMd", n=i + 1), "", p.strip(), ""]
             else:
                 lines += [pages[0].strip(), ""]
+            text = "\n".join(lines)
         tmp = out.with_name(out.name + ".tmp")
         try:
-            tmp.write_text("\n".join(lines), encoding="utf-8")
+            tmp.write_text(text, encoding="utf-8")
             os.replace(tmp, out)
         except BaseException:
             try:
