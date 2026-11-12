@@ -14,6 +14,7 @@ on_event 回调（webview_server 转成 SSE）推给前端：
 from __future__ import annotations
 
 import json
+import locale
 import os
 import re
 import subprocess
@@ -59,6 +60,25 @@ DEFAULT_SETTINGS = {
 # 重启时回退到它——因为彼时本进程可能已重挂到自定义解释器，sys.executable
 # 不再是默认环境。
 BASE_PYTHON_ENV = "OCRMT_BASE_PYTHON"
+
+
+def decode_child_text(raw: bytes) -> str:
+    """子进程输出解码：先 UTF-8，失败按系统 ANSI 代码页（zh-CN 上是 GBK）。
+
+    目标解释器/程序按自己的 locale 输出 stderr；一律按 UTF-8 解会把
+    "信息: 系统找不到指定的文件" 变成乱码塞进界面（实测 where.exe 探测）。
+    只有全部编码都失败才用 replace 保底，保证永不抛。
+    """
+    if not raw:
+        return ""
+    for enc in ("utf-8", locale.getpreferredencoding(False), "mbcs"):
+        if not enc:
+            continue
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError, ValueError):
+            continue
+    return raw.decode("utf-8", errors="replace")
 
 
 def reexec_if_custom_python():
@@ -131,6 +151,9 @@ class WebBackend:
         # probe_python 结果短缓存（「检测→应用」两步复用；60s 失效，
         # 用户中途给目标环境补装包后重新「检测」即可拿到新结果）
         self._probe_cache = ("", 0.0, None)
+        # 硬件推荐短缓存：一次 GET /api/env 会在 env_status 与 _torch_flavor
+        # 各取一次，缓存 60s 避免重复跑显卡枚举（PowerShell，~0.5s）
+        self._rec_cache = (0.0, None)
 
     # ── 事件与设置 ───────────────────────────────────────────
     def _emit(self, event: str, payload: dict):
@@ -306,7 +329,7 @@ class WebBackend:
                 return {"ok": False, "error": tr("err.envBusy")}
             if not quick_check(self._model_dir()):
                 return {"ok": False, "error": tr("err.modelMissing")}
-            if not quick_check_torch(self._torch_flavor()):
+            if not quick_check_torch(self._torch_flavor(persist=True)):
                 return {"ok": False, "error": tr("err.noTorchComponent")}
             self.loading = True
             self._task_label = tr("task.load")
@@ -342,22 +365,35 @@ class WebBackend:
         return {"ok": True, "loading": True}
 
     # ── 推理引擎组件（torch 运行时，按硬件选装）─────────────────
-    def _torch_flavor(self) -> str:
+    def _recommend(self) -> dict:
+        """硬件推荐（进程内 60s 缓存，供 env_status / _torch_flavor 共用）。"""
+        from downloader import recommend_torch_flavor
+        ts, rec = self._rec_cache
+        if rec is not None and time.time() - ts < 60:
+            return rec
+        rec = recommend_torch_flavor()
+        self._rec_cache = (time.time(), rec)
+        return rec
+
+    def _torch_flavor(self, persist: bool = False) -> str:
         """生效的组件 flavor：设置值合法用之；其次已装者；否则按硬件推荐。
 
-        推荐结果随即写回设置（与 STTMiniTool._crisp_variant 同手法）：
-        推荐值由当次硬件检测得出，不固化在代码里。
+        **纯查询**：推荐值只在 persist=True 的动作路径（如 start_load）写回
+        设置；读路径（GET /api/env）绝不写盘——只读介质上也不该因此 500。
         """
-        from downloader import (installed_torch_info, recommend_torch_flavor,
-                                torch_flavors)
+        from downloader import installed_torch_info, torch_flavors
         s = self._settings_raw().get("torchFlavor") or ""
         if s in torch_flavors():
             return s
         info = installed_torch_info()
         if info and info.get("flavor") in torch_flavors():
             return info["flavor"]
-        rec = recommend_torch_flavor().get("recommended") or "cpu"
-        self.settings.update({"torchFlavor": rec})
+        rec = self._recommend().get("recommended") or "cpu"
+        if persist:
+            try:
+                self.settings.update({"torchFlavor": rec})
+            except Exception as e:      # 写失败不影响本次查询结果
+                log_error("保存推荐组件类型失败", exc=e)
         return rec
 
     def env_ready(self) -> bool:
@@ -367,9 +403,9 @@ class WebBackend:
     def env_status(self) -> dict:
         """硬件检测 + 组件菜单 + 安装状态（前端「推理引擎」卡片渲染）。"""
         import shutil as _shutil
-        from downloader import installed_torch_info, recommend_torch_flavor
+        from downloader import installed_torch_info
         try:
-            rec = recommend_torch_flavor()
+            rec = self._recommend()
         except Exception as e:
             log_error("硬件检测失败", exc=e)
             return {"ok": False, "error": str(e), "options": []}
@@ -674,9 +710,29 @@ class WebBackend:
 
     @staticmethod
     def _sanitize_name(name: str) -> str:
+        """文件名净化：去非法字符 / 控制字符，避开 Windows 保留设备名。
+
+        保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9，带任何扩展名与前后空格
+        都同样保留）在 Windows 上打不开：`aux.png` 会让落盘抛
+        FileNotFoundError、NUL 字符会让 Path 抛 ValueError——识别跑完才在
+        写盘阶段整体失败（实测）。这里统一加下划线前缀绕开。
+        """
         banned = '<>:"/\\|?*'
-        name = "".join(c for c in name if c not in banned).strip().rstrip(".")
-        return (name or "result")[:80]
+        name = "".join(c for c in name
+                       if c not in banned and c != "\x00" and c.isprintable())
+        name = name.strip().strip(".")      # 前后空白与点：避免 "..evil"/隐藏名
+        name = name or "result"
+        if WebBackend._is_reserved_windows_name(name):
+            name = "_" + name
+        return name[:80]
+
+    @staticmethod
+    def _is_reserved_windows_name(name: str) -> bool:
+        """是否是 Windows 保留设备名（含 "aux.png"、"CON " 这类写法）。"""
+        stem = name.split(".", 1)[0].strip().upper()
+        if stem in {"CON", "PRN", "AUX", "NUL"}:
+            return True
+        return bool(re.fullmatch(r"(?:COM|LPT)[1-9]", stem))
 
     @staticmethod
     def _md_to_plain(md: str) -> str:
@@ -699,8 +755,13 @@ class WebBackend:
         return s.strip()
 
     def _save_output(self, name: str, result: dict, fmt: str = "md") -> Path:
-        """识别结果落盘。fmt="md"（默认）或 "txt"（纯文本）。"""
+        """识别结果落盘。fmt="md"（默认）或 "txt"（纯文本）。
+
+        先写 `<out>.tmp` 再 os.replace：中途崩溃/被杀不会留下半截结果文件
+        （旧实现直接 write_text，断电或 os._exit 会留下截断的 .md）。
+        """
         OUTPUT_DIR.mkdir(exist_ok=True)
+        name = self._sanitize_name(name)          # 兜底：调用方已净化也不亏
         ext = "txt" if fmt == "txt" else "md"
         out = OUTPUT_DIR / f"{name}.{ext}"
         i = 1
@@ -723,13 +784,36 @@ class WebBackend:
                     lines += [tr("out.pageMd", n=i + 1), "", p.strip(), ""]
             else:
                 lines += [pages[0].strip(), ""]
-        out.write_text("\n".join(lines), encoding="utf-8")
+        tmp = out.with_name(out.name + ".tmp")
+        try:
+            tmp.write_text("\n".join(lines), encoding="utf-8")
+            os.replace(tmp, out)
+        except BaseException:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         return out
 
     def cancel(self) -> bool:
         """请求取消当前任务（下载/识别页间生效）。"""
         self.cancel_event.set()
         return True
+
+    def wait_for_tasks(self, timeout: float = 2.0) -> bool:
+        """有界等待后台任务收尾，返回 True＝已全部结束。
+
+        退出路径专用：先 cancel_all() 再最多等 timeout 秒——下载因此留下可
+        续传残档、识别不静默丢结果；随后调用方仍是 os._exit 硬退出（torch/
+        DLL 正常卸载有卡死实录，不能改回 sys.exit）。
+        """
+        deadline = time.time() + max(0.0, timeout)
+        while time.time() < deadline:
+            if not self.has_running_tasks():
+                return True
+            time.sleep(0.05)
+        return not self.has_running_tasks()
 
     # ── 历史输出 ─────────────────────────────────────────────
     def list_history(self) -> dict:
@@ -870,12 +954,12 @@ class WebBackend:
         except OSError as e:
             return {"ok": False, "path": exe, "error": str(e)}
         if r.returncode != 0:
-            tail = (r.stderr or b"").decode("utf-8", errors="replace").strip()
+            tail = decode_child_text(r.stderr or b"").strip()
             return {"ok": False, "path": exe,
                     "error": tr("py.probeFailed", err=tail.splitlines()[-1][:200]
                                 if tail else f"exit {r.returncode}")}
         try:
-            info = json.loads(r.stdout.decode("utf-8", errors="replace")
+            info = json.loads(decode_child_text(r.stdout)
                               .strip().splitlines()[-1])
         except Exception:
             return {"ok": False, "path": exe, "error": tr("py.probeBadOutput")}

@@ -69,6 +69,70 @@ MIN_SIZE_BYTES: dict[str, int] = {
     "_sparse_base_impl.py":             100_000,
 }
 
+# 下载清单：记录每个文件下载完成时的真实字节数（Content-Length 对账结果）。
+# 1 GiB 下限挡不住"下到 2GB 就被关掉"的截断权重（真实权重 4.66GB/1.57GB），
+# 那会被 quick_check 当成完整模型、启动自动加载后失败。清单存在时按精确
+# 大小比对；旧目录没有清单 → 退回 MIN_SIZE_BYTES 下限（向后兼容）。
+MANIFEST_NAME = "_manifest.json"
+
+
+def _manifest_path(model_dir: Path) -> Path:
+    return Path(model_dir) / MANIFEST_NAME
+
+
+def read_manifest(model_dir: Path) -> dict[str, int]:
+    """读下载清单；缺失/损坏/仓库不符一律返回 {}（旧目录照旧走下限）。"""
+    try:
+        data = json.loads(_manifest_path(model_dir).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict) or data.get("repo") != REPO_ID:
+        return {}
+    files = data.get("files")
+    if not isinstance(files, dict):
+        return {}
+    out: dict[str, int] = {}
+    for k, v in files.items():
+        if isinstance(k, str) and isinstance(v, int) and v > 0:
+            out[k] = v
+    return out
+
+
+def write_manifest(model_dir: Path, sizes: dict[str, int]):
+    """把已知文件大小并入清单（临时文件 + os.replace 原子替换）。
+
+    只应在文件确实下载完成后调用；写失败静默——清单是完整性增强，
+    不该因为它而让下载流程失败。
+    """
+    merged = read_manifest(model_dir)
+    merged.update({k: v for k, v in sizes.items()
+                   if isinstance(v, int) and v > 0})
+    path = _manifest_path(model_dir)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps({"repo": REPO_ID, "files": merged},
+                                  ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _file_size_ok(p: Path, fname: str, manifest: dict[str, int]) -> bool:
+    """单个模型文件是否完整：有清单按精确字节数，否则按下限。"""
+    try:
+        size = p.stat().st_size
+    except OSError:
+        return False
+    want = manifest.get(fname)
+    if want:
+        return size == want
+    return size >= MIN_SIZE_BYTES.get(fname, 1)
+
 
 def set_mirror(base: str | None):
     """设置镜像站（如 hf-mirror.com）；空串恢复官方源。线程安全性由调用方保证。"""
@@ -115,46 +179,45 @@ def file_url(fname: str) -> str:
 
 
 def quick_check(model_dir: Path) -> bool:
-    """所有必要文件都存在且越过大小下限 → True（不联网校验哈希）。"""
+    """所有必要文件都存在且大小可信 → True（不联网校验哈希）。
+
+    有 `_manifest.json` 时按清单里的精确字节数比对（截断的权重会被识破）；
+    没有清单的旧目录退回 MIN_SIZE_BYTES 下限。
+    """
     model_dir = Path(model_dir)
+    manifest = read_manifest(model_dir)
     for fname in ALL_FILES:
         p = model_dir / fname
         if not p.is_file():
             return False
-        floor = MIN_SIZE_BYTES.get(fname, 1)
-        try:
-            if p.stat().st_size < floor:
-                return False
-        except OSError:
+        if not _file_size_ok(p, fname, manifest):
             return False
     return True
 
 
 def missing_files(model_dir: Path) -> list[str]:
-    """返回缺失（或残缺）的文件名清单。"""
+    """返回缺失（或残缺）的文件名清单（判定口径同 quick_check）。"""
     model_dir = Path(model_dir)
+    manifest = read_manifest(model_dir)
     out = []
     for fname in ALL_FILES:
         p = model_dir / fname
-        ok = p.is_file()
-        if ok:
-            try:
-                ok = p.stat().st_size >= MIN_SIZE_BYTES.get(fname, 1)
-            except OSError:
-                ok = False
-        if not ok:
+        if not p.is_file() or not _file_size_ok(p, fname, manifest):
             out.append(fname)
     return out
 
 
-def _download_file(url: str, dest: Path, progress_cb=None, cancel_check=None):
-    """下载单一文件至 dest，支持断点续传。
+def _download_file(url: str, dest: Path, progress_cb=None, cancel_check=None,
+                   expected_size: int | None = None) -> int:
+    """下载单一文件至 dest，支持断点续传；返回落盘后的字节数。
 
     progress_cb(done_bytes, total_bytes)
     cancel_check() 返回 True → 抛 CancelledError（保留 .part，下次续传）。
 
     完整性校验：下载结束时对账 Content-Length——不匹配（连接中断导致静默
     截断）则删除残档并抛 RuntimeError，绝不把残缺文件留给加载端当完整模型。
+    expected_size（可选，来自 HEAD）：已知远端大小时，416/落盘后再核对一次，
+    大小不符就删掉重下而不是把残档当"已完整"。
     """
     from applog import log_download, log_error
 
@@ -169,8 +232,18 @@ def _download_file(url: str, dest: Path, progress_cb=None, cancel_check=None):
         resp = urllib.request.urlopen(req, timeout=60, context=_ssl_ctx())
     except urllib.error.HTTPError as e:
         if e.code == 416:
-            # 416 Range Not Satisfiable = 本地文件已完整，直接视为成功
-            return
+            # 416 Range Not Satisfiable = 本地已 >= 远端。只有"确实相等"才算
+            # 完整；本地比远端还大/大小不符说明残档坏了，删掉重下。
+            local = dest.stat().st_size if dest.exists() else 0
+            if expected_size is not None and local != expected_size:
+                try:
+                    dest.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    f"本地残档大小不符（{local}/{expected_size} 字节），"
+                    f"已删除，重试将重下。")
+            return local
         raise
     except urllib.error.URLError as e:
         # 证书验证失败（企业代理重签 TLS、系统缺根证书）→ 降级不验证重试一次。
@@ -220,7 +293,74 @@ def _download_file(url: str, dest: Path, progress_cb=None, cancel_check=None):
         raise RuntimeError(
             f"下载中断：{dest.name} 只收到 {done / 1_048_576:.0f}/"
             f"{total / 1_048_576:.0f} MB（残档已删除，重试将续传/重下）。")
+    if expected_size is not None and done != expected_size:
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"下载大小与远端不符：{dest.name} 期望 {expected_size} 字节，"
+            f"实得 {done} 字节（残档已删除）。")
     log_download(f"{dest.name}: download OK ({done / 1_048_576:.1f} MB)")
+    return done
+
+
+def _remote_size(url: str, timeout: float = 30.0) -> int | None:
+    """HEAD 取远端字节数（校验收到的残档/分卷用）。取不到返回 None。"""
+    try:
+        req = urllib.request.Request(url, method="HEAD",
+                                     headers={"User-Agent": _UA})
+        with urllib.request.urlopen(req, timeout=timeout,
+                                    context=_ssl_ctx()) as resp:
+            n = int(resp.headers.get("Content-Length") or 0)
+            return n if n > 0 else None
+    except Exception:
+        return None
+
+
+def _download_part(url: str, pdest: Path, progress_cb=None,
+                   cancel_check=None) -> int:
+    """下载一个分卷到 pdest：字节数对得上才改名，短档不会被永远跳过。
+
+    旧实现是 `if not pdest.exists(): _download_file(...)`：上次被杀/断网留下
+    的短分卷会被**永远跳过**，拼接出的 zip 短一截、解压失败（D6）。现在：
+      • 期望字节数来自 HEAD（拿不到就退化为"下完即用"）；
+      • 先写 `<pdest>.part`，与期望一致才 os.replace 成正式名；
+      • 正式名已存在且大小符合期望 → 跳过（幂等；不符则重下）。
+    """
+    expected = _remote_size(url)
+    staging = pdest.with_name(pdest.name + ".part")
+    if expected is not None:
+        try:
+            if pdest.is_file() and pdest.stat().st_size == expected:
+                try:
+                    staging.unlink(missing_ok=True)   # 清掉上次的暂存残留
+                except OSError:
+                    pass
+                return expected
+        except OSError:
+            pass
+        try:
+            if staging.is_file() and staging.stat().st_size == expected:
+                os.replace(staging, pdest)
+                return expected
+        except OSError:
+            pass
+    got = _download_file(url, staging, progress_cb=progress_cb,
+                         cancel_check=cancel_check)
+    try:
+        got = staging.stat().st_size
+    except OSError:
+        got = 0
+    if expected is not None and got != expected:
+        try:
+            staging.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"分卷不完整：{pdest.name} 期望 {expected} 字节，实得 {got} 字节。")
+    os.replace(staging, pdest)
+    return got
 
 
 class CancelledError(RuntimeError):
@@ -486,37 +626,58 @@ def download_torch(flavor: str, progress_cb=None, cancel_check=None,
     if n_parts == 1:
         # 单文件：.part 断点续传，完成后改正式名
         zip_path = RUNTIME_DIR / (meta["zip"] + ".part")
+        expected = _remote_size(url)
         if final_zip.exists() and not zip_path.exists():
-            zip_path = final_zip    # 上次已完整下载但未装完：直接复用
+            # 上次已完整下载但未装完：大小对得上才复用，否则当残档重下
+            reuse = True
+            if expected is not None:
+                try:
+                    reuse = final_zip.stat().st_size == expected
+                except OSError:
+                    reuse = False
+            if reuse:
+                zip_path = final_zip
+            else:
+                try:
+                    final_zip.unlink(missing_ok=True)
+                except OSError:
+                    pass
         was_part = zip_path.suffix == ".part"
-        _download_file(url, zip_path,
-                       progress_cb=lambda done, total: progress_cb(
-                           0.9 * done / total, tr("env.dlProgress",
-                                                  done=done // 1_048_576,
-                                                  total=max(total // 1_048_576, 1)))
-                       if (progress_cb and total) else None,
-                       cancel_check=cancel_check)
+        got = _download_file(
+            url, zip_path,
+            progress_cb=lambda done, total: progress_cb(
+                0.9 * done / total, tr("env.dlProgress",
+                                       done=done // 1_048_576,
+                                       total=max(total // 1_048_576, 1)))
+            if (progress_cb and total) else None,
+            cancel_check=cancel_check, expected_size=expected)
+        if expected is not None and got != expected:
+            try:
+                zip_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"组件包大小不符：{zip_path.name} 期望 {expected} 字节，"
+                f"实得 {got} 字节（残档已删除）。")
         if was_part:
             zip_path.rename(final_zip)   # .part 残档 → 正式名（重命名文件本身）
     else:
         # 分卷资产（GitHub 单资产上限 2GB）：逐卷断点续传 → 二进制拼接。
-        # 已下完整的卷再次请求 Range 时服务器回 416 → _download_file 视为
-        # 成功跳过，天然支持「断点在任意卷」；拼接中途中断则 .concat 作废
-        # 重拼（卷本身完好，不重下）。
+        # 每卷先写 <part>.part 暂存、HEAD 字节数对得上才改名；短分卷因此会
+        # 重下而不是被 `if not exists` 永远跳过（D6）。
         part_files = []
         for i in range(1, n_parts + 1):
             pname = f"{meta['zip']}.part{i:02d}-of-{n_parts}"
             pdest = RUNTIME_DIR / pname
-            if not pdest.exists():
-                _download_file(f"{_TORCH_REL_BASE}/{pname}", pdest,
-                               progress_cb=lambda done, total, _i=i: progress_cb(
-                                   0.9 * ((_i - 1) + done / total) / n_parts,
-                                   tr("env.dlPartProgress",
-                                      part=_i, total=n_parts,
-                                      done=done // 1_048_576,
-                                      tmb=max(total // 1_048_576, 1)))
-                               if (progress_cb and total) else None,
-                               cancel_check=cancel_check)
+            _download_part(f"{_TORCH_REL_BASE}/{pname}", pdest,
+                           progress_cb=lambda done, total, _i=i: progress_cb(
+                               0.9 * ((_i - 1) + done / total) / n_parts,
+                               tr("env.dlPartProgress",
+                                  part=_i, total=n_parts,
+                                  done=done // 1_048_576,
+                                  tmb=max(total // 1_048_576, 1)))
+                           if (progress_cb and total) else None,
+                           cancel_check=cancel_check)
             part_files.append(pdest)
         concat = RUNTIME_DIR / (meta["zip"] + ".concat.part")
         if progress_cb:
@@ -637,6 +798,15 @@ def download_model(model_dir: Path, progress_cb=None, cancel_check=None,
                     time.sleep(2 * (attempt + 1))
         if last_err is not None:
             raise last_err
+
+        # 记进清单（精确字节数）：下次启动 quick_check 就能识破被截断的文件，
+        # 而不是拿 1 GiB 下限放行后在加载阶段炸。
+        try:
+            size = dest.stat().st_size
+        except OSError:
+            size = 0
+        if size > 0:
+            write_manifest(model_dir, {fname: size})
 
         if progress_cb:
             progress_cb(base_pct + span_pct, tr("dl.fileDone", name=fname))

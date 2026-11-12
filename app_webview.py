@@ -150,6 +150,82 @@ def _find_app_hwnd() -> int:
         return 0
 
 
+# ════════════════════════════════════════════════════════
+# 单实例：命名互斥 + 聚焦旧窗口
+# ════════════════════════════════════════════════════════
+_SINGLE_INSTANCE_MUTEX = "Local\\OCRMiniTool.SingleInstance"
+_MUTEX_HANDLE = None
+
+
+def _focus_existing_window() -> bool:
+    """把已在运行的窗口拉到前台（找不到/失败静默返回 False）。"""
+    if sys.platform != "win32":
+        return False
+    try:
+        u = ctypes.windll.user32
+        titles = [APP_NAME]
+        try:
+            titles.append(tr("app.name"))
+        except Exception:
+            pass
+        for title in titles:
+            if not title:
+                continue
+            hwnd = int(u.FindWindowW(None, title) or 0)
+            if hwnd:
+                u.ShowWindow(hwnd, 9)          # SW_RESTORE
+                u.SetForegroundWindow(hwnd)
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def acquire_single_instance() -> bool:
+    """Win32 命名互斥：True＝本进程是唯一实例（或无法判定，静默放行）。
+
+    False＝已有实例在运行（已尝试聚焦旧窗口，调用方应退出）。
+    **任何**失败（非 Windows／无权限／API 异常）都返回 True——绝不能因为
+    单实例检测把应用卡在起不来的状态。
+    """
+    global _MUTEX_HANDLE
+    if sys.platform != "win32" or _MUTEX_HANDLE is not None:
+        return True
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.restype = wintypes.HANDLE
+        k32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL,
+                                     wintypes.LPCWSTR]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = k32.CreateMutexW(None, True, _SINGLE_INSTANCE_MUTEX)
+        already = ctypes.get_last_error() == 183        # ERROR_ALREADY_EXISTS
+        if not handle:
+            return True                                 # 权限等原因拿不到 → 放行
+        if already:
+            try:
+                k32.CloseHandle(handle)
+            except Exception:
+                pass
+            _focus_existing_window()
+            return False
+        _MUTEX_HANDLE = handle
+        return True
+    except Exception:
+        return True
+
+
+def release_single_instance():
+    """释放互斥（正常退出由进程结束自动释放，这里供测试/复用）。"""
+    global _MUTEX_HANDLE
+    if _MUTEX_HANDLE is None:
+        return
+    try:
+        ctypes.windll.kernel32.CloseHandle(_MUTEX_HANDLE)
+    except Exception:
+        pass
+    _MUTEX_HANDLE = None
+
+
 _APP_USER_MODEL_ID = "OCRMiniTool"
 _WM_SETICON = 0x0080
 _ICON_SMALL, _ICON_BIG = 0, 1
@@ -361,6 +437,13 @@ def main():
     # 没自动加载模型，本进程拉起新进程后即刻退出）。
     reexec_if_custom_python()
 
+    # 单实例：已有实例在跑 → 聚焦旧窗口并退出。绝不能双开：两个进程会各自
+    # 自动加载模型（显存翻倍）、同写 outputs/ 与 settings.json、同时下载模型。
+    # 检测失败静默放行（acquire_single_instance 内部已兜住所有异常）。
+    if not acquire_single_instance():
+        print("[OCR MiniTool] 已在运行，已切换到现有窗口。")
+        return
+
     # UTF-8 模式：避免简中 Windows（GBK）控制台 print 中文/符号出错
     os.environ.setdefault("PYTHONUTF8", "1")
 
@@ -413,6 +496,13 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        # 退出前给任务最多 2s 收尾（取消 + 有界等待）：下载因此留下可续传
+        # 残档、识别不静默丢结果。随后仍走 os._exit（原因见下方注释）。
+        try:
+            srv.backend.cancel_all()
+            srv.backend.wait_for_tasks(2.0)
+        except Exception:
+            pass
         # os._exit：跳过 atexit/GC/DLL 卸载（torch 常驻资源清理可能卡死成
         # 僵尸进程），由 OS 直接回收；Job handle 关闭连带终止残余子进程。
         try:

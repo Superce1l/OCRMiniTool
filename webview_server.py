@@ -31,17 +31,34 @@ Host/Origin 校验挡 DNS rebinding / 跨站 POST。
 from __future__ import annotations
 
 import json
+import os
 import queue
+import select
 import shutil
+import socket
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from applog import log_error, log_info
 from i18n import tr
 from webview_backend import WebBackend
+
+# SSE keepalive 周期（秒）。同时是"客户端已断开"的检测粒度：写已关连接在
+# Windows 上首次可能成功，靠 _peer_gone() + 这个周期把线程回收压到 ≤5s。
+SSE_KEEPALIVE = 5.0
+
+# 每个 SSE 连接的缓冲上限：客户端读得慢/假死时丢最旧，不再无限吃内存。
+SSE_QUEUE_MAX = 256
+
+# 访问日志：默认关闭（SSE 与状态轮询会刷屏）。排查时设环境变量
+# OCRMT_HTTP_LOG=1，或进程内把本模块的 _HTTP_LOG 置 True。
+HTTP_LOG = (os.environ.get("OCRMT_HTTP_LOG") or "").strip().lower() not in (
+    "", "0", "false", "no", "off")
 
 
 def resolve_web_dir() -> Path:
@@ -191,30 +208,100 @@ _CONTENT_TYPES = {
 }
 
 
+class _Subscriber:
+    """一条 SSE 连接的事件缓冲（有界 + status 合并）。
+
+    • 有界（SSE_QUEUE_MAX）：客户端读得慢或假死时丢最旧，内存不随事件数增长；
+    • status 合并：未消费的 status 只占队里一个"占位符"，真实快照存在
+      `_status` 槽里并不断被最新值覆盖——合并后前端拿到的始终是**最新**状态。
+    """
+
+    __slots__ = ("_q", "_lock", "_status", "_status_queued")
+
+    def __init__(self, maxsize: int = SSE_QUEUE_MAX):
+        self._q: queue.Queue = queue.Queue(maxsize=maxsize)
+        self._lock = threading.Lock()
+        self._status: dict | None = None
+        self._status_queued = False
+
+    def put(self, msg: dict):
+        with self._lock:
+            if msg.get("event") == "status":
+                self._status = msg                 # 快照：后到的覆盖先到的
+                if self._status_queued:
+                    return                         # 队里已有占位符，不必再入队
+                if self._enqueue_locked(_STATUS_TOKEN):
+                    self._status_queued = True
+                return
+            self._enqueue_locked(msg)
+
+    def _enqueue_locked(self, item) -> bool:
+        try:
+            self._q.put_nowait(item)
+            return True
+        except queue.Full:
+            try:
+                self._q.get_nowait()               # 丢最旧
+            except queue.Empty:
+                pass
+            try:
+                self._q.put_nowait(item)
+                return True
+            except queue.Full:
+                return False
+
+    def get(self, timeout: float | None = None):
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if deadline is None:
+                item = self._q.get()
+            else:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise queue.Empty
+                item = self._q.get(timeout=left)
+            if item is not _STATUS_TOKEN:
+                return item
+            with self._lock:
+                msg = self._status
+                self._status = None
+                self._status_queued = False
+            if msg is not None:
+                return msg
+            # 极小概率：占位符还在但快照已被取走 → 继续取下一条
+
+    def qsize(self) -> int:
+        return self._q.qsize()
+
+
+# status 占位符（只用于唤醒消费者；真实快照在 _Subscriber._status）
+_STATUS_TOKEN = object()
+
+
 class _EventHub:
-    """SSE 广播：每个连接一个 Queue，publish() 推给全部订阅者。"""
+    """SSE 广播：每个连接一个 _Subscriber，publish() 推给全部订阅者。"""
 
     def __init__(self):
-        self._subs: set[queue.Queue] = set()
+        self._subs: set[_Subscriber] = set()
         self._lock = threading.Lock()
 
-    def subscribe(self) -> queue.Queue:
-        q: queue.Queue = queue.Queue()
+    def subscribe(self) -> _Subscriber:
+        sub = _Subscriber()
         with self._lock:
-            self._subs.add(q)
-        return q
+            self._subs.add(sub)
+        return sub
 
-    def unsubscribe(self, q: queue.Queue):
+    def unsubscribe(self, sub: _Subscriber):
         with self._lock:
-            self._subs.discard(q)
+            self._subs.discard(sub)
 
     def publish(self, event: str, payload: dict):
         msg = {"event": event, "payload": payload}
         with self._lock:
             subs = list(self._subs)
-        for q in subs:
+        for sub in subs:
             try:
-                q.put_nowait(msg)
+                sub.put(msg)
             except Exception:
                 pass
 
@@ -238,9 +325,17 @@ class WebViewServer:
 
         class _Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
+            _body_read = 0          # 本次请求已从 rfile 读掉的字节数（早退兜底用）
 
-            def log_message(self, *a):
-                pass
+            def log_message(self, fmt, *args):
+                """访问日志（默认关）。打开后每条一行：客户端 请求行 状态码。"""
+                if not HTTP_LOG:
+                    return
+                try:
+                    log_info(f"http {self.address_string()} "
+                             f"{(fmt % args) if args else fmt}")
+                except Exception:
+                    pass
 
             def _json(self, obj, code=200):
                 body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -254,21 +349,69 @@ class WebViewServer:
                 self._json({"error": {"message": msg}}, code)
 
             def _read_json_body(self) -> dict:
-                n = int(self.headers.get("Content-Length", 0))
+                try:
+                    n = int(self.headers.get("Content-Length", 0))
+                except (TypeError, ValueError):
+                    self._body_read = 0
+                    raise
                 if not n:
                     return {}
                 try:
-                    return json.loads(self.rfile.read(n).decode("utf-8"))
+                    raw = self.rfile.read(n)
+                    self._body_read = len(raw)
+                    return json.loads(raw.decode("utf-8"))
                 except Exception:
                     return {}
+
+            def _drain_body(self, limit: int = 1 << 20) -> bool:
+                """早退（403/400/404/500）前把没读的请求体读掉。
+
+                HTTP/1.1 keep-alive 下，残留的请求体会被当成下一条请求的起始
+                行 → 客户端下一个请求收到 400/501（实测复现）。返回 False 表示
+                体太大或读失败，此时置 close_connection，宁可断开也不串包。
+                """
+                # 只有"带实体"的方法才排空：GET/HEAD 声称有 body 一律当异常，
+                # 直接关连接（不去读一个可能永远不来的 body，避免卡住 handler）。
+                if self.command not in ("POST", "PUT", "PATCH"):
+                    try:
+                        declared = int(self.headers.get("Content-Length") or 0)
+                    except (TypeError, ValueError):
+                        declared = 0
+                    if declared > 0:
+                        self.close_connection = True
+                    return False
+                try:
+                    declared = int(self.headers.get("Content-Length") or 0)
+                except (TypeError, ValueError):
+                    declared = 0
+                left = declared - getattr(self, "_body_read", 0)
+                if left <= 0:
+                    return True
+                if left > limit:
+                    self.close_connection = True
+                    return False
+                try:
+                    while left > 0:
+                        chunk = self.rfile.read1(min(left, 1 << 16))
+                        if not chunk:
+                            self.close_connection = True
+                            return False
+                        left -= len(chunk)
+                        self._body_read = self._body_read + len(chunk)
+                except Exception:
+                    self.close_connection = True
+                    return False
+                return True
 
             def _check_host(self) -> bool:
                 allowed = {f"127.0.0.1:{server.port}", f"localhost:{server.port}"}
                 if self.headers.get("Host", "") not in allowed:
+                    self._drain_body()
                     self._err(403, "bad host")
                     return False
                 origin = self.headers.get("Origin")
                 if origin and origin not in {f"http://{a}" for a in allowed}:
+                    self._drain_body()
                     self._err(403, "bad origin")
                     return False
                 return True
@@ -278,6 +421,22 @@ class WebViewServer:
                 path = urlparse(self.path).path
                 if (path.startswith("/api/") or path == "/health") and not self._check_host():
                     return
+                try:
+                    return self._route_get(path)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+                except Exception as e:
+                    # 读路径同样要兜底：以前 GET 内抛异常 = 客户端只看到
+                    # RemoteDisconnected、日志里一个字都没有（实测）。
+                    log_error(f"GET {path} 处理失败", exc=e)
+                    self._drain_body()
+                    try:
+                        return self._err(500, tr("err.internal"))
+                    except Exception:
+                        self.close_connection = True
+                        return
+
+            def _route_get(self, path: str):
                 if path == "/health":
                     return self._json({"status": "ok",
                                        "modelReady": bool(server.backend.engine.ready)})
@@ -348,8 +507,12 @@ class WebViewServer:
                         return self._json({"ok": server.backend.open_output_dir()})
                     if path == "/api/shutdown":
                         return self._shutdown()
+                    self._drain_body()
                     return self._err(404, "unknown api")
                 except Exception as e:
+                    # 兜底：请求体可能没读完（keep-alive 残留体会串成下一个
+                    # 请求的起始行），先排空再回应。
+                    self._drain_body()
                     return self._err(500, str(e))
 
             def _shutdown(self):
@@ -360,11 +523,21 @@ class WebViewServer:
                         self._json({"ok": True})
                     except Exception:
                         pass
+                    # C9：先请求取消并给任务最多 2s 收尾（下载留可续传残档、
+                    # 识别不静默丢结果），再停服；最后仍是 os._exit 硬退出
+                    # （torch/DLL 正常卸载有卡死实录，不能改回 sys.exit）。
+                    try:
+                        server.backend.cancel_all()
+                    except Exception:
+                        pass
+                    try:
+                        server.backend.wait_for_tasks(2.0)
+                    except Exception:
+                        pass
                     try:
                         server.stop()
                     except Exception:
                         pass
-                    import os
                     os._exit(0)
 
                 _t.Thread(target=_kill, daemon=True).start()
@@ -387,13 +560,27 @@ class WebViewServer:
                 self.end_headers()
                 self.wfile.write(data)
 
+            def _peer_gone(self) -> bool:
+                """客户端是否已断开（SSE 客户端从不发数据：可读且 peek 到空 = FIN）。
+
+                Windows 上向已关闭连接写第一次可能仍"成功"，只靠写失败回收要等
+                两个 keepalive 周期；这里用 0 超时 select + MSG_PEEK 精确判断。
+                """
+                try:
+                    readable, _, _ = select.select([self.connection], [], [], 0)
+                    if not readable:
+                        return False
+                    return self.connection.recv(1, socket.MSG_PEEK) == b""
+                except OSError:
+                    return True
+
             def _sse(self):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Connection", "keep-alive")
                 self.end_headers()
-                q = server.hub.subscribe()
+                sub = server.hub.subscribe()
                 try:
                     self.wfile.write(b": connected\n\n")
                     self.wfile.flush()
@@ -401,9 +588,9 @@ class WebViewServer:
                             "payload": server.backend.get_status()}
                     self.wfile.write(f"data: {json.dumps(init, ensure_ascii=False)}\n\n".encode("utf-8"))
                     self.wfile.flush()
-                    while True:
+                    while not self._peer_gone():
                         try:
-                            msg = q.get(timeout=15)
+                            msg = sub.get(timeout=SSE_KEEPALIVE)
                         except queue.Empty:
                             self.wfile.write(b": keepalive\n\n")
                             self.wfile.flush()
@@ -413,17 +600,19 @@ class WebViewServer:
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     pass
                 finally:
-                    server.hub.unsubscribe(q)
+                    server.hub.unsubscribe(sub)
 
             # ── 识别（multipart 多文件上传）────────────────────
             def _recognize(self):
                 ctype = self.headers.get("Content-Type", "")
                 if "multipart/form-data" not in ctype or "boundary=" not in ctype:
+                    self._drain_body()
                     return self._err(400, tr("err.needMultipart"))
                 boundary = ctype.split("boundary=", 1)[1].strip().strip('"').encode()
                 try:
                     n = int(self.headers.get("Content-Length", 0))
                 except ValueError:
+                    self._drain_body()
                     return self._err(400, tr("err.noContentLength"))
                 if n <= 0:
                     return self._err(400, tr("err.emptyBody"))
@@ -433,6 +622,7 @@ class WebViewServer:
                 try:
                     fields, files = _parse_multipart_stream(
                         self.rfile, boundary, tmp_dir, n)
+                    self._body_read = n          # 解析器已把整个体读完
                     uploads = files.get("files") or files.get("file") or []
                     if not uploads:
                         return self._err(400, tr("err.noFilesPart"))
