@@ -13,8 +13,10 @@
 纯 CPU 可跑，速度约每秒数 token 属正常）。
 
 识别：model.infer() 单入口——传文件列表即「多页合并解析」（一次请求带跨页
-上下文，输出按 <PAGE> 分页）；传单图默认 gundam 动态切片。取消在逐页模式
-的页间生效；单次大请求内不可中断（与引擎实现一致，界面会如实提示）。
+上下文，输出按 <PAGE> 分页）；传单图默认 gundam 动态切片。取消在解码过程中
+逐 token 生效；视觉编码/prefill 的单次前向内部不可中断（单页可达数十秒）。
+每次推理的 prefill/decode 耗时、token 数、finish_reason 记入 applog 的 OCR
+通道，并作为中性字段回给 recognize()（truncated / pagesMismatch / infer）。
 """
 from __future__ import annotations
 
@@ -73,12 +75,59 @@ def _make_hooked_streamer(base_cls):
             state = _STREAM_HOOK.get("state")
             if state is not None and text:
                 state["chars"] += len(_TAG_RE.sub("", text))
+            # 只在解码过程中抛取消。stream_end=True 是模型侧 `_uocr_generate`
+            # 的 finally 里 streamer.end() 触发的收尾调用
+            # （modeling_unlimitedocr.py:1196-1200）：那里再抛会把先发生的
+            # 真实异常（OOM/断言/CUDA 错误）替换成「已取消」，排障时丢真因。
+            # 取消与否由 recognize() 末尾的兜底判定（ocr_engine.py 内
+            # `if cancel_event.is_set()`）统一裁决，这里只负责尽早中断解码。
+            if stream_end:
+                return
             event = _STREAM_HOOK.get("cancel_event")
             if event is not None and event.is_set():
                 print(f"[stream-hook] 取消生效，已生成 {state['chars'] if state else '?'} 字",
                       flush=True)
                 raise OcrCancelledError("用户取消")
     return _HookedTextStreamer
+
+
+# ── 设备探测缓存（状态轮询高频调用，torch/CUDA 探测不必每次跑）──────
+# device_info() 由 backend.get_status() 每次返回都调用（webview_backend.py
+# get_status → engine.device_info），而它要 import torch、查 CUDA 可用性、
+# 取显存规格。结果缓存 5s；缓存键必须包含「torch 是否可见 + runtime 组件
+# 安装标记」——用户中途装完/卸掉 torch 组件后必须立刻失效，否则界面会一直
+# 显示「未装 torch」。_ensure_runtime_path() 把组件目录插进 sys.path 的
+# 那一刻也主动作废缓存（双保险：标记 mtime 变化 + 显式失效）。
+_DEVICE_INFO_TTL = 5.0
+_DEVICE_INFO_CACHE: dict = {"ts": -1e18, "key": None, "value": None}
+
+
+def _invalidate_device_info_cache():
+    """作废设备探测缓存（组件安装/卸载、测试隔离时调用）。"""
+    _DEVICE_INFO_CACHE.update(ts=-1e18, key=None, value=None)
+
+
+def _torch_visible() -> bool:
+    """torch 是否可见（零导入成本）：已在 sys.modules，或 spec 可解析。"""
+    if "torch" in sys.modules:
+        return True
+    import importlib.util as _ilu
+    try:
+        return _ilu.find_spec("torch") is not None
+    except (ImportError, ValueError):     # 半初始化/命名空间包的怪状态
+        return False
+
+
+def _torch_marker_sig():
+    """runtime 组件安装标记（torch_build.json）的 (mtime_ns, size)；未装为 None。
+
+    只 stat 不解析：安装/覆盖组件必然改写该文件，mtime 变化即让缓存失效。
+    """
+    try:
+        st = (RUNTIME_DIR / "torch_build.json").stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
 
 
 # ── 推理引擎组件（torch）的运行时接线 ────────────────────────────
@@ -99,6 +148,7 @@ def _ensure_runtime_path():
             or installed_torch_info() is None:
         return
     sys.path.insert(0, str(RUNTIME_DIR))
+    _invalidate_device_info_cache()      # 组件刚可见：作废「未装 torch」的探测结果
     if sys.platform == "win32":
         lib = RUNTIME_DIR / "torch" / "lib"
         if lib.is_dir():
@@ -180,6 +230,97 @@ def _torch():
         raise EngineError(tr("err.noTorchComponent")) from e
 
 
+# ── 识别度量与 PDF dpi 归一（A1 / A7）────────────────────────────
+_DEFAULT_PDF_DPI = 200
+_DPI_MIN, _DPI_MAX = 72, 600
+
+
+def _normalize_dpi(dpi) -> int:
+    """PDF 光栅化 dpi 归一：None/非法 → 200，越界夹到 [72, 600]。
+
+    默认 200 与旧行为完全一致（调用方不传 dpi 时）；上限 600 只是防呆，
+    200 dpi 已覆盖模型 1×2 tile（1280 px 高）所需的分辨率。
+    """
+    try:
+        v = _DEFAULT_PDF_DPI if dpi is None else int(dpi)
+    except (TypeError, ValueError):
+        return _DEFAULT_PDF_DPI
+    if v <= 0:
+        return _DEFAULT_PDF_DPI
+    return max(_DPI_MIN, min(_DPI_MAX, v))
+
+
+def _summarize_infer(raw: dict | None) -> dict:
+    """把 model.infer(return_dict=True) 的返回值收敛成中性度量字段。
+
+    真实键名以模型源码为准：models/Unlimited-OCR-2/modeling_unlimitedocr.py
+    的 `_uocr_generate` 返回处（1202-1205 行）——
+    text / token_ids / prompt_token_ids / finish_reason / num_pages_out /
+    expected_pages / time / prefill_time；`infer` 在 1105-1108 行再补 prompt 后
+    原样返回该 dict。模型返回纯 str（兼容分支）时全部度量置 None/False，
+    绝不误报截断。
+    """
+    stats = {"finishReason": None, "outputTokens": None, "prefillSecs": None,
+             "decodeSecs": None, "tokensPerSec": None, "numPagesOut": None,
+             "expectedPages": None, "truncated": False, "pagesMismatch": False}
+    if not isinstance(raw, dict):
+        return stats
+    finish = raw.get("finish_reason")
+    stats["finishReason"] = finish if isinstance(finish, str) else None
+    toks = raw.get("token_ids")
+    if isinstance(toks, (list, tuple)):
+        stats["outputTokens"] = len(toks)
+    for src, dst in (("prefill_time", "prefillSecs"), ("time", "decodeSecs")):
+        v = raw.get(src)
+        if isinstance(v, (int, float)):
+            stats[dst] = float(v)
+    if stats["prefillSecs"] is not None and stats["decodeSecs"] is not None:
+        # 模型侧 time 是「生成总耗时」，prefill_time 是「到首 token」的耗时，
+        # 故解码段 = time - prefill_time（模型注释见 _uocr_generate 返回处）。
+        dec = max(0.0, stats["decodeSecs"] - stats["prefillSecs"])
+        stats["decodeSecs"] = dec
+        if dec > 0 and stats["outputTokens"]:
+            stats["tokensPerSec"] = round(stats["outputTokens"] / dec, 1)
+    for src, dst in (("num_pages_out", "numPagesOut"),
+                     ("expected_pages", "expectedPages")):
+        v = raw.get(src)
+        if isinstance(v, int):
+            stats[dst] = v
+    # finish_reason 初值是 'length'（1156 行），只有遇到 EOS 才改成 'stop'
+    # （1179-1181 行）。因此 'length' = 撞到 max_new_tokens / max_length，
+    # 即输出被截断。
+    stats["truncated"] = stats["finishReason"] == "length"
+    exp, out = stats["expectedPages"], stats["numPagesOut"]
+    stats["pagesMismatch"] = bool(exp and exp > 0 and out is not None and out != exp)
+    return stats
+
+
+def _log_infer(stats: dict, n_images: int):
+    """把一次推理的度量写进 applog 的 OCR 通道；永不抛异常（applog 约定）。"""
+    try:
+        from applog import log_ocr
+        bits = [f"images={n_images}"]
+        if stats.get("prefillSecs") is not None:
+            bits.append(f"prefill={stats['prefillSecs']:.1f}s")
+        if stats.get("decodeSecs") is not None:
+            bits.append(f"decode={stats['decodeSecs']:.1f}s")
+        if stats.get("outputTokens") is not None:
+            bits.append(f"tokens={stats['outputTokens']}")
+        if stats.get("tokensPerSec") is not None:
+            bits.append(f"tps={stats['tokensPerSec']}")
+        if stats.get("finishReason"):
+            bits.append(f"finish={stats['finishReason']}")
+        if stats.get("expectedPages") is not None:
+            bits.append(f"pages={stats.get('numPagesOut')}/{stats['expectedPages']}")
+        if stats.get("truncated"):
+            bits.append("TRUNCATED")
+        if stats.get("pagesMismatch"):
+            bits.append("PAGES-MISMATCH")
+        log_ocr("引擎指标：" + " ".join(bits))
+    except Exception:
+        pass
+
+
 class OcrEngine:
     """封装 Unlimited-OCR-2。recognize() 加互斥锁，多线程安全。"""
 
@@ -194,6 +335,10 @@ class OcrEngine:
         self.dtype_name = "bfloat16"
         self._error = None
         self.stream_state = {"chars": 0}   # 当前识别已生成字数（流式钩子更新）
+        # 幂等加载（A10）：记录本次成功加载的模型目录，判断「已加载且口径未变」
+        # 时 load() 直接返回，不再重复读 6.69 GB 权重。unload() 会清空。
+        self._loaded_dir: Path | None = None
+        self._last_infer: dict | None = None   # 最近一次 _infer 的度量（A1）
 
     def generated_chars(self) -> int:
         """当前（或最近一次）识别已生成的可见字数。"""
@@ -212,7 +357,7 @@ class OcrEngine:
         self._error = str(msg)
 
     def device_info(self) -> dict:
-        """torch/CUDA 检测（不依赖模型已加载）。
+        """torch/CUDA 检测（不依赖模型已加载），结果按 5s 缓存。
 
         cudaBuild 是 torch.version.cuda（CPU 版 torch 为 None/""）——issue #3
         的教训：安装包打进 CPU 版 torch 时 cuda 恒为 False，必须和「有 CUDA
@@ -226,7 +371,24 @@ class OcrEngine:
             也救不回（AutoModel 永远 requires the PyTorch library）。
         torch 可见性用 find_spec 探测（零导入成本）：dev 命中 venv 的 torch、
         冻结环境命中 runtime/ 组件，两侧语义一致。
+
+        缓存（5s）：命中条件除 TTL 外还要求「torch 可见性 + 组件安装标记」
+        未变；`_ensure_runtime_path()` 装上组件时还会主动作废缓存，避免
+        界面上「装完组件仍显示未装 torch」。返回结构不变（每次给副本）。
         """
+        _ensure_runtime_path()
+        key = (_torch_visible(), _torch_marker_sig())
+        cached = _DEVICE_INFO_CACHE
+        now = time.time()
+        if (cached["value"] is not None and cached["key"] == key
+                and now - cached["ts"] < _DEVICE_INFO_TTL):
+            return dict(cached["value"])
+        info = self._device_info_probe()
+        _DEVICE_INFO_CACHE.update(ts=time.time(), key=key, value=dict(info))
+        return info
+
+    def _device_info_probe(self) -> dict:
+        """真正跑一次 torch/CUDA 探测（无缓存；device_info 的缓存后端）。"""
         info = {"torch": None, "cuda": False, "cudaName": "", "vramGb": 0.0,
                 "cudaBuild": "", "transformers": None}
         _ensure_runtime_path()
@@ -244,8 +406,11 @@ class OcrEngine:
                     and installed_torch_info() is None:
                 return info
         frozen = bool(getattr(sys, "frozen", False))
+        # 负缓存读的是类属性：旧实现写成模块级名 `device_info._torch_fail_at`，
+        # 而 device_info 只是类方法名（不是模块全局）——冻结环境走到这一行会
+        # 抛 NameError，把 /api/status 打成 500。改用 type(self) 访问。
         if frozen and 'torch' not in sys.modules \
-                and time.time() - device_info._torch_fail_at < 60:
+                and time.time() - type(self)._torch_fail_at < 60:
             return info
         try:
             import transformers
@@ -268,7 +433,7 @@ class OcrEngine:
             # 捕一切：torch 半残/命名空间包等怪状态下 AttributeError 之类
             # 不该把 /api/status 打成 500。留痕后按「不可用」呈现。
             if frozen:
-                device_info._torch_fail_at = time.time()
+                type(self)._torch_fail_at = time.time()
             from applog import log_error
             log_error("device_info 探测 torch 异常", exc=e)
         return info
@@ -282,10 +447,15 @@ class OcrEngine:
         return (installed_torch_info() or {}).get("flavor") or "cpu"
 
     # ── 加载 ─────────────────────────────────────────────────
-    def load(self, device_pref: str = "auto", cb=None):
+    def load(self, device_pref: str = "auto", cb=None, force: bool = False):
         """从背景线程调用；cb(msg) 更新界面状态。
 
         device_pref: "auto" | "cuda" | "cpu"
+        force: 即使「已加载且设备/目录未变」也强制重载（替换模型文件后用）。
+
+        幂等：已 ready、目标设备相同、模型目录未变时直接返回，不重复读
+        6.69 GB 权重——重复加载会让两份权重同时常驻（16 GB 机器换页/被杀）。
+        设备或目录变了则照常重载；unload() 之后 ready=False，同样会重载。
         """
         torch = _torch()
         if not self.files_ready():
@@ -312,6 +482,15 @@ class OcrEngine:
         else:
             device = "cuda" if cuda_ok else "cpu"
         _patch_tensor_cuda(device == "cpu")
+
+        # 幂等短路（A10）：判定条件必须是「已真正加载 + 设备一致 + 目录一致」，
+        # 不能只看 ready——切设备（cpu↔cuda）或换模型目录时必须重新加载。
+        if not force and self.ready and self.model is not None \
+                and self.device == device \
+                and self._loaded_dir == Path(self.model_dir):
+            from applog import log_model
+            log_model(f"模型已在 {device} 加载且目录未变，跳过重复加载：{self.model_dir}")
+            return
 
         transformers_mod = _ensure_transformers()
         if transformers_mod is None:
@@ -344,13 +523,21 @@ class OcrEngine:
             self.model = model
             self.device = device
             self.ready = True
+            self._loaded_dir = Path(self.model_dir)
         _s(tr("eng.readyInfo", device=device, secs=f"{time.time() - t0:.0f}"))
 
     # ── PDF → 页图 ───────────────────────────────────────────
     @staticmethod
     def pdf_to_images(pdf_path: str | Path, dpi: int = 200,
                       out_dir: Path | None = None) -> list[Path]:
-        """PDF 逐页转 PNG（pymupdf）。缺库时抛带指引的 EngineError。"""
+        """PDF 逐页转 PNG（pymupdf）。缺库时抛带指引的 EngineError。
+
+        dpi: 光栅化分辨率，默认 200（recognize 传入前会经 _normalize_dpi
+        归一：None/非法 → 200，越界夹到 [72, 600]）。200 dpi 的 A4 ≈ 1654×2339，
+        已覆盖模型 gundam 1×2 tile（1280 px 高）所需；更高 dpi 只增加转图
+        时间与临时盘，不带来额外版面细节（模型会把页面缩到 640/1024 网格）。
+        out_dir: 输出目录（默认为 PDF 同目录）。临时目录由 recognize 创建并清理。
+        """
         try:
             import fitz   # pymupdf
         except Exception as e:
@@ -373,26 +560,38 @@ class OcrEngine:
     def recognize(self, image_paths: list[Path], prompt: str = "",
                   progress_cb=None, cancel_event: threading.Event | None = None,
                   max_new_tokens: int | None = None,
-                  crop_mode=None) -> dict:
-        """识别图片（可多页）。返回 {text, pages: [str], elapsed, tokens}。
+                  crop_mode=None, dpi: int | None = None) -> dict:
+        """识别图片（可多页）。返回 {text, pages: [str], elapsed, ...}。
 
         image_paths: 一或多张图片路径（按页序）。
         prompt: 空串 → DEFAULT_PROMPT。
         progress_cb(stage: str, done: int, total: int, elapsed: float)
           —— merged 模式 done/total 只有整体一条；paged 模式逐图推进。
+        dpi: PDF 逐页光栅化分辨率；None/非法 → 200（旧行为不变），仅对 .pdf 生效。
+        max_new_tokens / crop_mode: 透传给 model.infer（None＝模型默认策略）。
 
         merged（默认）：一次请求合并全部页（跨页上下文，<PAGE> 分隔输出）。
         单张图片由 model.infer 的 gundam 动态切片处理。
+
+        既有返回字段语义不变：text（多页时带 <!-- page N --> 注释）、
+        pages（逐页 Markdown）、elapsed（秒）。此外**只增不改**：
+          tokens          输出 token 数（模型不回传时 None）
+          truncated       是否被生成上限截断（finish_reason == 'length'）
+          pagesMismatch   模型出的页数 != 提示里的页数（跨页内容可能丢失）
+          finishReason    'stop' / 'length' / None（模型返回纯文本时未知）
+          infer           度量明细（prefill/decode 秒、tokens/s 等）
         """
         if not self.ready:
             raise EngineError(tr("err.notLoaded"))
         if not image_paths:
             raise EngineError(tr("err.noImages"))
         prompt = (prompt or "").strip() or DEFAULT_PROMPT
+        pdf_dpi = _normalize_dpi(dpi)
 
         cancel_event = cancel_event or self.cancel_event
         t0 = time.time()
         results: list[str] = []
+        stats: dict = {}
         # 流式钩子：识别期间 on_finalized_text 会累计字数并检查取消
         self.stream_state = {"chars": 0}
         _STREAM_HOOK["cancel_event"] = cancel_event
@@ -407,7 +606,8 @@ class OcrEngine:
                     if p.suffix.lower() == ".pdf":
                         tmp_dir = Path(_tempfile.mkdtemp(prefix="ocr_pdf_"))
                         tmp_dirs.append(str(tmp_dir))
-                        expanded.extend(self.pdf_to_images(p, out_dir=tmp_dir))
+                        expanded.extend(self.pdf_to_images(
+                            p, out_dir=tmp_dir, dpi=pdf_dpi))
                     else:
                         expanded.append(p)
                 if not expanded:
@@ -416,8 +616,9 @@ class OcrEngine:
                 if len(expanded) == 1:
                     if progress_cb:
                         progress_cb(tr("eng.stageGundam"), 0, 1, 0.0)
-                    text = self._infer([expanded[0]], prompt, crop_mode=crop_mode,
-                                       max_new_tokens=max_new_tokens)
+                    text, stats = self._infer(
+                        [expanded[0]], prompt, crop_mode=crop_mode,
+                        max_new_tokens=max_new_tokens)
                     results = [to_gui_markdown(text)]
                     if progress_cb:
                         progress_cb(tr("prog.recognizeDone"), 1, 1, time.time() - t0)
@@ -425,8 +626,9 @@ class OcrEngine:
                     # 多页：合并为一次请求（模型的核心能力——跨页上下文）。
                     if progress_cb:
                         progress_cb(tr("eng.stageMerged", n=len(expanded)), 0, 1, 0.0)
-                    text = self._infer(expanded, prompt, crop_mode=False,
-                                       max_new_tokens=max_new_tokens)
+                    text, stats = self._infer(
+                        expanded, prompt, crop_mode=False,
+                        max_new_tokens=max_new_tokens)
                     parts = [p for p in PAGE_SPLIT_RE.split(text) if p.strip()]
                     results = [to_gui_markdown(p) for p in parts] or [text.strip()]
                     if progress_cb:
@@ -452,14 +654,23 @@ class OcrEngine:
                 if len(results) > 1 else results[0],
             "pages": results,
             "elapsed": elapsed,
+            # 以下为新增的中性字段（既有字段语义不变）
+            "tokens": stats.get("outputTokens"),
+            "truncated": bool(stats.get("truncated")),
+            "pagesMismatch": bool(stats.get("pagesMismatch")),
+            "finishReason": stats.get("finishReason"),
+            "infer": dict(stats),
         }
 
     def _infer(self, images: list[Path], prompt: str, crop_mode=None,
-               max_new_tokens: int | None = None) -> str:
-        """调 model.infer()（加锁串行）。
+               max_new_tokens: int | None = None) -> tuple[str, dict]:
+        """调 model.infer()（加锁串行）。返回 (纯文本, 度量 dict)。
 
         eval_mode=False → 解码走流式钩子（实时字数 + 取消中断）；
         钩子子类不打印，控制台保持安静。
+        return_dict=True 拿 finish_reason / num_pages_out / expected_pages /
+        prefill_time / time（键名以模型源码为准），同时**保留**模型只返回 str
+        的兼容分支（旧包装层/自造 stub）：那时度量全空、绝不误报截断。
         """
         torch = _torch()
         with self._lock:
@@ -470,6 +681,7 @@ class OcrEngine:
                     eval_mode=False,
                     temperature=0.0,
                     save_results=False,
+                    return_dict=True,
                 )
                 if crop_mode is not None:
                     kwargs["crop_mode"] = crop_mode
@@ -477,7 +689,19 @@ class OcrEngine:
                     kwargs["max_new_tokens"] = max_new_tokens
                 with torch.inference_mode():
                     out = self.model.infer(self.tokenizer, **kwargs)
-                return out if isinstance(out, str) else str(out)
+                # 兼容两种返回：dict（return_dict=True）与纯文本（旧实现/桩）
+                if isinstance(out, str):
+                    text, raw = out, None
+                elif isinstance(out, dict):
+                    raw = out
+                    val = out.get("text")
+                    text = "" if val is None else str(val)
+                else:                       # 未知类型：按旧行为 str()
+                    text, raw = str(out), None
+                stats = _summarize_infer(raw)
+                self._last_infer = stats
+                _log_infer(stats, len(images))
+                return text, stats
             except OcrCancelledError:
                 raise EngineError(tr("prog.cancelled"))
             except EngineError:
@@ -493,8 +717,13 @@ class OcrEngine:
         return text.replace("<PAGE>", "").strip()
 
     def unload(self):
-        """释放模型（切换设备/目录时用）。"""
+        """释放模型（切换设备/目录时用）。
+
+        清空 ready 与 _loaded_dir：之后再 load() 会真正重建（幂等短路不生效）。
+        """
         with self._lock:
             self.model = None
             self.tokenizer = None
             self.ready = False
+            self._loaded_dir = None
+            self._last_infer = None
