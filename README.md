@@ -37,12 +37,17 @@
 - 🖥️ **CUDA / CPU 自适应**：有 NVIDIA 显卡自动用 CUDA + bfloat16；否则纯 CPU
   （自带 CPU 兼容补丁，绕过模型源码中的 `.cuda()` 硬编码）
 - 📝 **结果预览 + 导出**：Markdown 实时渲染 / 原文切换、**原文可直接改字**（逐页编辑，
-  保存与复制取改后的内容）、逐页查看、复制全文、另存 `.md` / `.txt`（输出格式在设置页选择）
+  保存与复制取改后的内容）、逐页查看、复制全文、另存 `.md` / `.txt` / `.json`（输出格式在设置页选择）
+- 📦 **结构化 JSON 输出**：每页的版面块（类型 / 标题层级 / bbox 坐标 / 阅读序 / 渲染片段），
+  GUI 导出、CLI `--format json` 与 HTTP 响应三处同构——可直接给下游做表格重建、版面分析、坐标定位
+- 🔎 **结果内查找 / 替换**：在原文视图里查找、上一个/下一个定位、替换与全部替换，
+  改完仍可保存（多页结果按当前页处理，「全部」视图只读）
 - ⏹️ **识别可中断**：流式解码 + 实时「已生成 N 字」，取消在**解码阶段** 1～2
   秒内生效；视觉编码的单次前向不可中断（长页可达数十秒～数分钟，界面会如实提示）
 - 🧩 **推理引擎按需下载**：安装包不含 PyTorch（~145MB 级；v1.2.0 实测 zip 约 144MB）；模型页按显卡二选一
   下载运行时组件——CPU（约 260MB）/ CUDA 12.8 · NVIDIA 专用（约 3.3GB，自带
-  CUDA 运行时，无需装 Toolkit，需 570+ 驱动）。断点续传、装完即用；进入模型页
+  CUDA 运行时，无需装 Toolkit，需 570+ 驱动）。断点续传、装完即用、**整包 sha256 校验**
+  （默认告警，`OCRMT_VERIFY_RUNTIME=strict` 时不一致删除）；进入模型页
   时自动检测硬件并推荐（组件由 `build_components.py` 从官方 wheel 打包，
   发布于仓库 GitHub Release）。**换组件需要退出程序再重开**：运行中已加载的
   DLL 无法覆盖，程序会提前拦下并提示，不会让你白等一次 3.5 GB 下载
@@ -75,6 +80,11 @@
    多页时按页标签切换、「复制全文」或「保存」；批量模式下结果按文件列表展示，点击查看
    - **可编辑**：切到「原文」即可直接改错字，改动写回当前页（多页结果按页编辑；
      「全部」页签是整篇只读视图），结果区会显示「已编辑」，保存/复制都取改后内容
+   - **查找 / 替换**：原文视图上方有查找栏，支持上一个/下一个定位、替换与全部替换
+     （多页时作用于当前页；无匹配会提示）
+   - **导出 JSON**：设置里把「输出格式」选成 JSON 后，保存与自动落盘都是
+     `.json`（页/块/层级/bbox/阅读序，schema 见 [docs/cli.md](docs/cli.md)）；
+     历史文件没有结构化数据时会提示重新识别，不会导出空文件
 5. 「**打开输出文件夹**」直达 `outputs/`（识别结果按设置的格式自动存为 `.md` / `.txt`，
    批量模式每个文件一份）
 6. **整目录识别**：「选择文件夹」后由后端直接读路径批量入列（不上传、不占临时盘），
@@ -127,7 +137,7 @@
 | **模型下载位置** | Unlimited-OCR-2 的存储目录；留空＝程序目录下的 `models/Unlimited-OCR-2` |
 | **HuggingFace 镜像站** | 直连 huggingface.co 较慢或失败时改用镜像（如 `hf-mirror.com`） |
 | **推理设备** | 自动（有 NVIDIA **且显存 ≥8 GB** 用 CUDA；不足 8 GB 自动用 CPU，因为小显存会把权重挤到共享内存、反而更慢）/ CUDA / CPU |
-| **输出格式** | 识别结果自动保存与「保存」按钮导出的文件格式：Markdown（`.md`）/ 纯文本（`.txt`） |
+| **输出格式** | 识别结果自动保存与「保存」按钮导出的文件格式：Markdown（`.md`）/ 纯文本（`.txt`）/ **JSON（页/块/层级/坐标，见 [docs/cli.md](docs/cli.md) 的 JSON schema）** |
 | **单页生成上限** | 单页最多生成多少 token（默认 4096；0 = 不限）。调小可避免超长页跑几小时，调大可减少长表格被截断 |
 | **合并页数上限** | 合并解析一次请求最多几页（默认 20；0 = 不限）。超出自动分组，组间可取消，但跨组不共享上下文 |
 | **图像切片模式** | 自动 / gundam（细节更全、更慢）/ base（更快）。自动=单图 gundam、多页 base；**base 会压缩超长图并可能丢小字，长截图建议用自动或 gundam** |
@@ -180,7 +190,7 @@ webview/locales/        # 语言包 en / zh（前后端共用，加语言=加一
 assets/make_icon.py     # 图标生成（Pillow 绘制 → PNG/ICO）
 OCRMiniTool.spec        # PyInstaller onedir 打包配置
 runtime_hook_utf8.py    # 冻结运行时 UTF-8 / 证书修复钩子
-tests/                  # 回归套件（stdlib unittest，665 用例，无需模型/GPU/GUI）
+tests/                  # 回归套件（stdlib unittest，756 用例，无需模型/GPU/GUI）
 tools/check.py          # 静态体检（语法/JSON/语言包键对齐/i18n 键引用/行尾）
 tools/normalize_eol.py  # 行尾归一（幂等）
 .github/workflows/ci.yml# CI：测试 + 体检 + 前端消毒器对抗测试
@@ -227,9 +237,11 @@ uv run python build_components.py cu128   rem → 单个约 3.3GB zip + manifest
 - GitHub 单资产上限 2GB：cu128 整包需按 **1900 MiB** 切成两卷，命名
   `ocrmini-runtime-torch<版本>-cu128.zip.part01-of-2` / `.part02-of-2`
   （第二卷为余下部分）；应用内下载按卷续传后二进制约拼接。
-- 上传：cpu zip、cu128 两卷、`manifest.json` 到 Release（tag 与
-  `downloader._TORCH_TAG` 一致，当前 `runtime-torch2.8.0`），并在 Release
-  说明里贴出 sha256（当前应用只对账 Content-Length，整包哈希校验待补）。
+- 上传：cpu zip、cu128 两卷、`manifest.json`、以及 `build_components.py` 自动生成的
+  `<zip>.sha256` 与 `SHA256SUMS`（tag 与 `downloader._TORCH_TAG` 一致，当前
+  `runtime-torch2.8.0`）。应用下载完成后会按整包 sha256 对账：默认 **warn-only**
+  （日志告警、继续安装），`set OCRMT_VERIFY_RUNTIME=strict` 时不一致会删除产物并报错。
+  详见 [docs/build-notes.md](docs/build-notes.md) §8。
 
 ### 源码执行
 
