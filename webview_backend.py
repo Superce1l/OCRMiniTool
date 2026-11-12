@@ -14,6 +14,7 @@ on_event 回调（webview_server 转成 SSE）推给前端：
 from __future__ import annotations
 
 import json
+import inspect
 import locale
 import os
 import re
@@ -54,7 +55,135 @@ DEFAULT_SETTINGS = {
     "scale": 100,
     "lang": "zh",          # 界面语言，默认中文（en | zh；i18n.py / i18n.js）
     "pythonPath": "",      # 自定义 Python 解释器（源码运行时）；空 = 启动器选择的 venv
+    # ── 识别限幅 / 版面参数（P0 契约）──────────────────────────
+    "maxPageTokens": 4096,   # 单页输出 token 上限；0 = 不限；合法 0 或 [256, 65536]
+    "maxMergedPages": 20,    # 合并请求的页数上限；0 = 不限；合法 0 或 [1, 200]
+    "cropMode": "auto",      # auto | gundam | base
+    "dropHeaders": False,    # 是否丢弃页眉页脚块
 }
+
+# 目录扫描 / 路径直读共用：允许的扩展名（与 ocr_engine 的图片扩展 + pdf 对齐）
+SCAN_EXTS = frozenset({".jpg", ".jpeg", ".png", ".bmp", ".webp",
+                       ".tif", ".tiff", ".pdf"})
+MAX_SCAN_FILES = 10_000      # /api/scan-dir 的硬上限（防止一次列爆内存）
+MAX_SCAN_DEPTH = 64          # 目录深度硬上限
+MAX_RECOGNIZE_PATHS = 200    # 一次识别允许的路径数上限（与上传链路同量级）
+
+_CROP_MODES = ("auto", "gundam", "base")
+_ENGINE_GROUP_KWARGS = ("max_page_tokens", "max_merged_pages", "drop_headers")
+
+
+def _as_int(value) -> int | None:
+    """宽松取整：int 原样，纯数字字符串转换，其余（含 bool）返回 None。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        if re.fullmatch(r"[+-]?\d+", s or ""):
+            try:
+                return int(s, 10)
+            except ValueError:
+                return None
+    return None
+
+
+def _as_bool(value) -> bool | None:
+    """宽松取 bool：bool 原样，0/1 映射，其余返回 None。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    return None
+
+
+def _bad_value(key: str, value) -> dict:
+    """`err.badValue` 错误响应。
+
+    注意：i18n.tr(key, **params) 的第一个形参就叫 key，不能写
+    `tr("err.badValue", key=...)`（TypeError: multiple values）。这里取模板后
+    自行替换占位符，语义一致且不会因为占位符缺失抛异常。
+    """
+    msg = tr("err.badValue")
+    return {"ok": False,
+            "error": msg.replace("{key}", str(key)).replace("{value}",
+                                                            str(value))}
+
+
+def _is_link_like(path) -> bool:
+    """是否符号链接或目录联接（junction）。
+
+    只判 `is_symlink()` 不够：Windows 的目录联接（mklink /J、PowerShell
+    -ItemType Junction）不是 symlink，`DirEntry.is_dir(follow_symlinks=False)`
+    对它是 True——扫描会顺着它走出去。Python 3.12+ 有 os.path.isjunction。
+    """
+    try:
+        if os.path.islink(path):
+            return True
+        isjunction = getattr(os.path, "isjunction", None)
+        if isjunction is not None:
+            return bool(isjunction(path))
+    except OSError:
+        return True
+    return False
+
+
+def normalize_settings_patch(patch: dict) -> tuple[dict, dict | None]:
+    """校验并归一化四个识别参数键。
+
+    返回 (归一后的 patch, 错误响应)。**错误时调用方不得写盘**（一个键都不写，
+    避免"一半合法一半非法"的补丁落成半套设置）。整型接受数字字符串。
+    """
+    out = dict(patch or {})
+    if "maxPageTokens" in out:
+        v = _as_int(out["maxPageTokens"])
+        if v is None or not (v == 0 or 256 <= v <= 65536):
+            return {}, _bad_value("maxPageTokens", out["maxPageTokens"])
+        out["maxPageTokens"] = v
+    if "maxMergedPages" in out:
+        v = _as_int(out["maxMergedPages"])
+        if v is None or not (v == 0 or 1 <= v <= 200):
+            return {}, _bad_value("maxMergedPages", out["maxMergedPages"])
+        out["maxMergedPages"] = v
+    if "cropMode" in out:
+        v = str(out["cropMode"] if out["cropMode"] is not None else "").strip().lower()
+        if v not in _CROP_MODES:
+            return {}, _bad_value("cropMode", out["cropMode"])
+        out["cropMode"] = v
+    if "dropHeaders" in out:
+        v = _as_bool(out["dropHeaders"])
+        if v is None:
+            return {}, _bad_value("dropHeaders", out["dropHeaders"])
+        out["dropHeaders"] = v
+    return out, None
+
+
+def normalize_recognize_paths(raw_paths) -> tuple[list[Path], dict | None]:
+    """校验「按路径直读」的输入（与 /api/scan-dir 同一套边界）。
+
+    只接受存在的绝对文件、扩展名白名单内、数量不超限、且自身不是符号链接
+    （符号链接/目录联接一律不跟随）。返回 (路径列表, 错误响应)。
+    """
+    if not isinstance(raw_paths, (list, tuple)) or not raw_paths:
+        return [], _bad_value("paths", str(raw_paths)[:80])
+    if len(raw_paths) > MAX_RECOGNIZE_PATHS:
+        return [], _bad_value("paths",
+                              f"{len(raw_paths)} > {MAX_RECOGNIZE_PATHS}")
+    out: list[Path] = []
+    for raw in raw_paths:
+        text = str(raw or "").strip()
+        p = Path(os.path.expandvars(text)).expanduser()
+        try:
+            if (not text or not p.is_absolute() or _is_link_like(p)
+                    or not p.is_file()
+                    or p.suffix.lower() not in SCAN_EXTS):
+                return [], {"ok": False,
+                            "error": tr("err.badPath", path=text)}
+        except OSError:
+            return [], {"ok": False, "error": tr("err.badPath", path=text)}
+        out.append(p)
+    return out, None
 
 # 首个启动进程（run.bat 选定的 venv python）写入环境变量；「恢复默认解释器」
 # 重启时回退到它——因为彼时本进程可能已重挂到自定义解释器，sys.executable
@@ -189,6 +318,11 @@ class WebBackend:
                 "scale": cur.get("scale", 100),
                 "lang": cur.get("lang", "zh"),
                 "pythonPath": cur.get("pythonPath", ""),
+                # 识别限幅 / 版面参数（原样返回，缺省用 DEFAULT_SETTINGS）
+                "maxPageTokens": cur.get("maxPageTokens", 4096),
+                "maxMergedPages": cur.get("maxMergedPages", 20),
+                "cropMode": cur.get("cropMode", "auto"),
+                "dropHeaders": bool(cur.get("dropHeaders", False)),
                 "languages": available_languages(),
                 "defaultModelDir": str(BASE_DIR / MODEL_SUBDIR),
                 # 源码运行才可切换解释器；PyInstaller 冻结版前端隐藏该设置
@@ -197,6 +331,10 @@ class WebBackend:
 
     def set_settings(self, patch: dict) -> dict:
         patch = {k: v for k, v in (patch or {}).items() if k in DEFAULT_SETTINGS}
+        # 四个识别参数先校验/归一：任何一个非法 → 整个补丁不落盘（原子语义）
+        patch, bad = normalize_settings_patch(patch)
+        if bad is not None:
+            return bad
         # 模型目录变化即时同步给引擎（仅空闲时切，避免下载/识别中途换目录——
         # 否则会出现「下载到新目录、加载却找旧目录」的分裂）
         if "modelDir" in patch and not self.has_running_tasks():
@@ -491,6 +629,55 @@ class WebBackend:
         return True
 
     # ── OCR 识别 ─────────────────────────────────────────────
+    def _engine_recognize_kwargs(self) -> dict:
+        """把四个识别参数设置翻译成引擎关键字。
+
+        cropMode 原样透传给引擎（"auto" / "gundam" / "base"）：引擎的 "auto"
+        才会按图片形状自动降级长截图（高宽比 > 3 → base，CPU 上 2–5×），
+        映射成 None 等于退回旧行为、让这个开关失效（实测过的缺陷）。
+        脏值（空/未知）一律回落 "auto"。
+        """
+        cur = self._settings_raw()
+        crop = str(cur.get("cropMode") or "auto").strip().lower()
+        if crop not in ("auto", "gundam", "base"):
+            crop = "auto"
+        return {
+            "max_page_tokens": _as_int(cur.get("maxPageTokens")) or 0,
+            "max_merged_pages": _as_int(cur.get("maxMergedPages")) or 0,
+            "drop_headers": bool(cur.get("dropHeaders", False)),
+            "crop_mode": crop,
+        }
+
+    def _call_engine_recognize(self, image_paths, **kwargs) -> dict:
+        """调用 engine.recognize，兼容新旧签名（engine-perf 正在改签名）。
+
+        做法：①用 inspect 探测引擎实际接受的参数名，只传它认识的（新引擎全传、
+        旧引擎自动裁掉 max_page_tokens/max_merged_pages/drop_headers）；②探测
+        失败（C 扩展/装饰器）按"全传"处理；③万一是绑定期 TypeError（引擎签名
+        比探测到的还老），只在报文明确是"unexpected keyword argument"时用旧
+        签名子集重试一次——绝不吞掉推理过程中的 TypeError 造成二次推理。
+        """
+        kwargs.update(self._engine_recognize_kwargs())
+        try:
+            params = inspect.signature(self.engine.recognize).parameters
+            accepted = set(params)
+            has_var_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD
+                             for p in params.values())
+        except (TypeError, ValueError):
+            accepted, has_var_kw = set(), True
+        call = kwargs if has_var_kw else {
+            k: v for k, v in kwargs.items() if k in accepted}
+        try:
+            return self.engine.recognize(image_paths, **call)
+        except TypeError as e:
+            msg = str(e)
+            if "unexpected keyword argument" not in msg and \
+                    "got an unexpected" not in msg:
+                raise
+            minimal = {k: v for k, v in call.items()
+                       if k not in _ENGINE_GROUP_KWARGS}
+            return self.engine.recognize(image_paths, **minimal)
+
     def recognize(self, opts: dict, progress_cb=None) -> dict:
         """opts: {paths: [str], name: 原始主文件名, prompt: str, mode: "merged"|"batch"}
 
@@ -554,9 +741,9 @@ class WebBackend:
                              daemon=True).start()
             try:
                 log_ocr(f"开始识别：{name}（{total} 个文件）")
-                result = self.engine.recognize(paths, prompt=prompt,
-                                               progress_cb=_cb,
-                                               cancel_event=self.cancel_event)
+                result = self._call_engine_recognize(
+                    paths, prompt=prompt, progress_cb=_cb,
+                    cancel_event=self.cancel_event)
             finally:
                 stop_ticker.set()
 
@@ -567,7 +754,7 @@ class WebBackend:
                     f"{elapsed:.0f}s）→ {out_path.name}")
             if progress_cb:
                 progress_cb(1.0, tr("prog.done"))
-            return {
+            payload = {
                 "mode": "merged",
                 "text": result.get("text", ""),
                 "pages": result.get("pages", []),
@@ -575,6 +762,21 @@ class WebBackend:
                 "elapsed": elapsed,
                 "cancelled": False,
             }
+            # 引擎新增的中性字段原样透传（截断/页数不符/分组/丢弃块）；旧引擎
+            # 没有这些键就自然缺省，不报错。
+            for key in ("truncated", "pagesMismatch", "finishReason",
+                        "groups", "droppedBlocks", "tokens"):
+                if key in result:
+                    payload[key] = result[key]
+            # 期望页数 / 实际页数：界面提示条要说清「期望 N 页、实际 M 页」，
+            # 只靠 truncated/pagesMismatch 布尔值说不清差多少。
+            inf = result.get("infer")
+            if isinstance(inf, dict):
+                if inf.get("expectedPages") is not None:
+                    payload["expectedPages"] = inf["expectedPages"]
+                if inf.get("numPagesOut") is not None:
+                    payload["actualPages"] = inf["numPagesOut"]
+            return payload
         except EngineError as e:
             if self.cancel_event.is_set():
                 log_ocr("识别已取消")
@@ -663,18 +865,29 @@ class WebBackend:
                                        stage=stage, time=time_s))
 
                 try:
-                    result = self.engine.recognize([path], prompt=prompt,
-                                                   progress_cb=_file_cb,
-                                                   cancel_event=self.cancel_event)
+                    result = self._call_engine_recognize(
+                        [path], prompt=prompt, progress_cb=_file_cb,
+                        cancel_event=self.cancel_event)
                     out_path = self._save_output(
                         self._sanitize_name(Path(display).stem), result, fmt)
                     chars = len(result.get("text", ""))
-                    items.append({"name": display, "ok": True,
-                                  "text": result.get("text", ""),
-                                  "pages": result.get("pages", []),
-                                  "outPath": str(out_path),
-                                  "elapsed": result.get("elapsed", 0),
-                                  "chars": chars})
+                    item = {"name": display, "ok": True,
+                            "text": result.get("text", ""),
+                            "pages": result.get("pages", []),
+                            "outPath": str(out_path),
+                            "elapsed": result.get("elapsed", 0),
+                            "chars": chars}
+                    # 批量条目也带截断/页数不符标记（引擎缺省时自然不带）
+                    for key in ("truncated", "pagesMismatch", "finishReason"):
+                        if key in result:
+                            item[key] = result[key]
+                    inf = result.get("infer")
+                    if isinstance(inf, dict):
+                        if inf.get("expectedPages") is not None:
+                            item["expectedPages"] = inf["expectedPages"]
+                        if inf.get("numPagesOut") is not None:
+                            item["actualPages"] = inf["numPagesOut"]
+                    items.append(item)
                     log_ocr(f"批量 {i + 1}/{total} 完成：{display}"
                             f"（{chars} 字，{result.get('elapsed', 0):.0f}s）")
                 except EngineError as e:
@@ -687,8 +900,10 @@ class WebBackend:
                             _skip_item(j)
                         break
                     log_error(f"批量 {i + 1}/{total} 失败：{display}", exc=e)
+                    # 完整错误交给界面「错误详情」面板展示；只做兜底上限，
+                    # 避免单个超长堆栈把 SSE/JSON 撑爆（原先 300 字让用户看不懂）
                     items.append({"name": display, "ok": False,
-                                  "error": str(e)[:300], "text": "",
+                                  "error": str(e)[:4000], "text": "",
                                   "elapsed": time.time() - f_start,
                                   "chars": 0})
 
@@ -814,6 +1029,69 @@ class WebBackend:
                 return True
             time.sleep(0.05)
         return not self.has_running_tasks()
+
+    # ── 目录扫描（前端「选目录批量」）──────────────────────────
+    def scan_dir(self, path: str, recursive: bool = True,
+                 max_files: int = 500, max_depth: int = 8) -> dict:
+        """列出目录下的可识别文件（只回路径，不回传内容）。
+
+        前端拿到路径后走 `/api/recognize` 的 `{"paths": [...]}` 直读形式。
+        安全边界（对应 E5）：只接受存在的绝对目录；不跟随符号链接/目录联接
+        （`os.scandir` + `follow_symlinks=False`，链接项直接跳过）；深度与
+        文件数双限；扩展名白名单（SCAN_EXTS）；单个目录读取失败跳过而不整体
+        失败；结果按路径排序，稳定可复现。
+        """
+        bad = {"ok": False, "error": tr("err.badPath", path=path if path else "")}
+        raw = str(path or "").strip().strip('"')
+        if not raw:
+            return bad
+        root = Path(os.path.expandvars(raw)).expanduser()
+        try:
+            if (not root.is_absolute() or _is_link_like(root)
+                    or not root.is_dir()):
+                return bad
+        except OSError:
+            return bad
+
+        limit = max(1, min(_as_int(max_files) or 500, MAX_SCAN_FILES))
+        depth_limit = max(1, min(_as_int(max_depth) or 8, MAX_SCAN_DEPTH))
+
+        files: list[dict] = []
+        truncated = False
+        stack: list[tuple[Path, int]] = [(root, 0)]
+        while stack and not truncated:
+            cur, depth = stack.pop()
+            try:
+                entries = list(os.scandir(cur))
+            except OSError:
+                continue                       # 单个目录读不了 → 跳过
+            entries.sort(key=lambda e: e.name.lower())
+            for entry in entries:
+                try:
+                    if _is_link_like(entry.path):
+                        continue               # 不跟随符号链接/目录联接
+                    if entry.is_dir(follow_symlinks=False):
+                        if recursive and depth < depth_limit:
+                            stack.append((Path(entry.path), depth + 1))
+                        continue
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    ext = Path(entry.name).suffix.lower()
+                    if ext not in SCAN_EXTS:
+                        continue
+                    size = entry.stat(follow_symlinks=False).st_size
+                except OSError:
+                    continue
+                if len(files) >= limit:
+                    # 只有真的还有「第 limit+1 个」符合条件的文件才算截断；
+                    # 恰好等于上限时不能误报（前端会提示"只取了前 N 个"）。
+                    truncated = True
+                    break
+                files.append({"path": entry.path, "name": entry.name,
+                              "size": int(size), "ext": ext})
+        files.sort(key=lambda f: f["path"].lower())
+        return {"ok": True, "files": files, "count": len(files),
+                "truncated": truncated}
 
     # ── 历史输出 ─────────────────────────────────────────────
     def list_history(self) -> dict:

@@ -17,7 +17,9 @@ Host/Origin 校验挡 DNS rebinding / 跨站 POST。
   GET  /api/events          → SSE：data: {"event","payload"} 进度/状态推送
   POST /api/download        → 开始下载模型（进度走 SSE dl-progress）
   POST /api/load            → 加载模型（进度走 SSE load-progress）
-  POST /api/recognize       → multipart 多文件上传识别，回 {text,pages,outPath}
+  POST /api/recognize       → multipart 多文件上传识别，或 JSON {"paths":[…]}
+                              直读本机路径（不复制文件），回 {text,pages,outPath}
+  POST /api/scan-dir        → 列目录下的可识别文件（只回路径，不回传内容）
   POST /api/cancel          → 请求取消当前任务
   POST /api/history-read    → 读取一条历史结果的文本
   POST /api/history-delete  → 删除一条历史结果（移入回收站）
@@ -46,7 +48,7 @@ from urllib.parse import urlparse
 
 from applog import log_error, log_info
 from i18n import tr
-from webview_backend import WebBackend
+from webview_backend import WebBackend, normalize_recognize_paths
 
 # SSE keepalive 周期（秒）。同时是"客户端已断开"的检测粒度：写已关连接在
 # Windows 上首次可能成功，靠 _peer_gone() + 这个周期把线程回收压到 ≤5s。
@@ -503,6 +505,13 @@ class WebViewServer:
                         body = self._read_json_body()
                         return self._json(server.backend.apply_python(
                             body.get("path", "")))
+                    if path == "/api/scan-dir":
+                        body = self._read_json_body()
+                        return self._json(server.backend.scan_dir(
+                            body.get("path", ""),
+                            recursive=bool(body.get("recursive", True)),
+                            max_files=body.get("maxFiles", 500),
+                            max_depth=body.get("maxDepth", 8)))
                     if path == "/api/open-output":
                         return self._json({"ok": server.backend.open_output_dir()})
                     if path == "/api/shutdown":
@@ -602,9 +611,13 @@ class WebViewServer:
                 finally:
                     server.hub.unsubscribe(sub)
 
-            # ── 识别（multipart 多文件上传）────────────────────
+            # ── 识别（multipart 上传 / JSON 路径直读）──────────
             def _recognize(self):
                 ctype = self.headers.get("Content-Type", "")
+                if "application/json" in ctype:
+                    # 前端分流：有 File 走 multipart；只有路径走 JSON 直读
+                    # （不落上传临时目录，校验与 scan-dir 同一套边界）
+                    return self._recognize_paths()
                 if "multipart/form-data" not in ctype or "boundary=" not in ctype:
                     self._drain_body()
                     return self._err(400, tr("err.needMultipart"))
@@ -652,12 +665,38 @@ class WebViewServer:
                             server.hub.publish("progress", {"pct": pct, "status": status}))
                         return self._json(result)
                     except Exception as e:
-                        from applog import log_error
                         log_error(f"识别失败：{primary_name}", exc=e)
                         head = str(e).splitlines()[0][:300] if str(e) else type(e).__name__
                         return self._err(500, head)
                 finally:
                     shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            def _recognize_paths(self):
+                """`{"paths": [...]}` 直读：不复制文件，校验后直接用原路径识别。"""
+                body = self._read_json_body()
+                paths, bad = normalize_recognize_paths(body.get("paths"))
+                if bad is not None:
+                    return self._json(bad, 400)
+                opts = {
+                    "paths": [str(p) for p in paths],
+                    "names": [p.name for p in paths],
+                    "name": (paths[0].stem if len(paths) == 1
+                             else f"{paths[0].stem} 等{len(paths)}个"),
+                    "prompt": body.get("prompt", ""),
+                    "mode": (body.get("mode") or "").strip(),
+                }
+                primary_name = opts["name"]
+                try:
+                    result = server.backend.recognize(
+                        opts, progress_cb=lambda pct, status:
+                        server.hub.publish("progress",
+                                           {"pct": pct, "status": status}))
+                    return self._json(result)
+                except Exception as e:
+                    log_error(f"识别失败：{primary_name}", exc=e)
+                    head = str(e).splitlines()[0][:300] if str(e) else \
+                        type(e).__name__
+                    return self._err(500, head)
 
         self._httpd = ThreadingHTTPServer((self.host, self._want_port), _Handler)
         self.port = self._httpd.server_address[1]
