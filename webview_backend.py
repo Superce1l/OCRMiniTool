@@ -689,9 +689,11 @@ class WebBackend:
         s = re.sub(r"^#{1,6}\s+", "", s, flags=re.M)          # 标题
         s = re.sub(r"\*\*([^*]+)\*\*", r"\1", s)              # 粗体
         s = re.sub(r"\*([^*\n]+)\*", r"\1", s)                # 斜体
+        # 围栏必须先于行内代码处理：否则 ```py 会被行内代码规则吃掉一对反引号，
+        # 语言标记（py / c++ / javascript）残留在正文里（实测）。
+        s = re.sub(r"(?:```|~~~)[A-Za-z0-9_+#.\-]*[ \t]*\r?\n?", "", s)
         s = re.sub(r"`([^`]+)`", r"\1", s)                    # 行内代码
         s = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", s)      # 链接 / 图片
-        s = re.sub(r"```[a-zA-Z0-9]*\n?", "", s)              # 代码围栏
         s = re.sub(r"^[\s>]*[-*+]\s+", "", s, flags=re.M)     # 列表符
         s = re.sub(r"[ \t]+\n", "\n", s)
         return s.strip()
