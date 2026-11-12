@@ -72,6 +72,73 @@ MAX_RECOGNIZE_PATHS = 200    # 一次识别允许的路径数上限（与上传�
 _CROP_MODES = ("auto", "gundam", "base")
 _ENGINE_GROUP_KWARGS = ("max_page_tokens", "max_merged_pages", "drop_headers")
 
+# ── A9：识别请求护栏（页数 / 单文件体积）──────────────────────────
+# 100+ 页 PDF 一次请求会同时驻留 GB 级 PIL 与临时 PNG（A8 未做），最坏生成
+# 时长也不可控。这里在**置忙之前**硬拦，错误信息直接告诉用户怎么拆。
+# 合并模式：一次请求会把所有文件当同一文档处理 → 按**总页数**限；
+# 批量模式：逐文件独立推理，内存只与单文件相关 → 按**单文件页数**限，
+#           否则目录扫描上限 200 个文件会被 150 页误伤。
+MAX_RECOGNIZE_PAGES = 150        # 合并=总页数上限；批量=单文件页数上限
+MAX_RECOGNIZE_FILE_MB = 512      # 单文件体积上限（MB）
+
+
+class RecognizeLimitError(EngineError):
+    """识别请求超过护栏上限：HTTP 400，不进入引擎、不置忙。"""
+
+    status = 400
+
+
+def _pdf_page_count(path: Path) -> int:
+    """PDF 页数；缺 pymupdf / 文件损坏等任何异常返回 0（未知 → 不拦）。"""
+    try:
+        import fitz   # pymupdf（可选依赖）
+        doc = fitz.open(str(path))
+        try:
+            return int(doc.page_count)
+        finally:
+            doc.close()
+    except Exception:
+        return 0
+
+
+def _check_recognize_limits(paths, *, batch: bool = False) -> None:
+    """A9 护栏：单文件体积超限或页数超限 → RecognizeLimitError。
+
+    batch=False（合并解析）：累计所有文件页数（PDF 按实际页数、图片=1），
+    超出 MAX_RECOGNIZE_PAGES 即拦。
+    batch=True（批量识别）：只看单个文件是否超页数；总量不受页数上限约束
+    （文件数上限由 MAX_RECOGNIZE_PATHS 管）。
+
+    必须在 `self.recognizing = True` **之前** 调用——这里抛错时还没置忙，
+    不会把后端永久卡在 busy。stat 失败（不存在/无权限）跳过，交给引擎报
+    更具体的原因（err.noPymupdf / 读图失败）。
+    """
+    total_pages = 0
+    for p in paths:
+        p = Path(p)
+        try:
+            size = p.stat().st_size
+        except OSError:
+            continue
+        mb = size / (1024 * 1024)
+        if mb > MAX_RECOGNIZE_FILE_MB:
+            raise RecognizeLimitError(
+                tr("err.fileTooLarge", name=p.name, mb=f"{mb:.1f}",
+                   limit=MAX_RECOGNIZE_FILE_MB))
+        pages = _pdf_page_count(p) if p.suffix.lower() == ".pdf" else 1
+        if batch:
+            # 单文件超页数：批量也不会把它拆开，整份仍会落到一次引擎调用
+            if pages > MAX_RECOGNIZE_PAGES:
+                raise RecognizeLimitError(
+                    tr("err.tooManyPages", pages=pages,
+                       limit=MAX_RECOGNIZE_PAGES))
+        else:
+            total_pages += pages            # 0 = 未知，不计入（引擎会报错）
+    if not batch and total_pages > MAX_RECOGNIZE_PAGES:
+        raise RecognizeLimitError(
+            tr("err.tooManyPages", pages=total_pages,
+               limit=MAX_RECOGNIZE_PAGES))
+
 
 def _as_int(value) -> int | None:
     """宽松取整：int 原样，纯数字字符串转换，其余（含 bool）返回 None。"""
@@ -727,6 +794,8 @@ class WebBackend:
             paths = [Path(p) for p in (opts.get("paths") or [])]
             if not paths:
                 raise EngineError(tr("err.noFiles"))
+            _check_recognize_limits(paths,
+                                    batch=(opts.get("mode") == "batch"))
             self.recognizing = True
             self._task_label = tr("task.ocr")
         self.cancel_event.clear()

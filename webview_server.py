@@ -46,7 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from applog import log_error, log_info
+from applog import log_error, log_info, log_warn
 from i18n import tr
 from webview_backend import WebBackend, normalize_recognize_paths
 
@@ -365,7 +365,18 @@ class WebViewServer:
                 self.end_headers()
                 self.wfile.write(body)
 
-            def _err(self, code, msg):
+            def _err(self, code, msg, *, logged: bool = False):
+                """统一错误响应；400/403 记一行 WARN（5xx 由调用方记 ERROR）。
+
+                logged=True 表示调用方已经记过这条错误（如 A9 护栏拒绝），
+                避免同一次拒绝在日志里出现两行。
+                """
+                if not logged and code in (400, 403):
+                    try:
+                        log_warn(f"HTTP {code} {self.command} "
+                                 f"{urlparse(self.path).path}：{msg}")
+                    except Exception:
+                        pass
                 self._json({"error": {"message": msg}}, code)
 
             def _read_json_body(self) -> dict:
@@ -425,14 +436,16 @@ class WebViewServer:
 
             def _check_host(self) -> bool:
                 allowed = {f"127.0.0.1:{server.port}", f"localhost:{server.port}"}
-                if self.headers.get("Host", "") not in allowed:
+                host = self.headers.get("Host", "")
+                if host not in allowed:
                     self._drain_body()
-                    self._err(403, "bad host")
+                    # 带上实际值：排查 DNS rebinding / 反代时只看 "bad host" 无从下手
+                    self._err(403, f"bad host: {host}")
                     return False
                 origin = self.headers.get("Origin")
                 if origin and origin not in {f"http://{a}" for a in allowed}:
                     self._drain_body()
-                    self._err(403, "bad origin")
+                    self._err(403, f"bad origin: {origin}")
                     return False
                 return True
 
@@ -538,7 +551,9 @@ class WebViewServer:
                     return self._err(404, "unknown api")
                 except Exception as e:
                     # 兜底：请求体可能没读完（keep-alive 残留体会串成下一个
-                    # 请求的起始行），先排空再回应。
+                    # 请求的起始行），先排空再回应。日志必须留 —— 以前这里
+                    # 不写日志，500 在 applog 里完全查不到。
+                    log_error(f"POST {path} 处理失败", exc=e)
                     self._drain_body()
                     return self._err(500, str(e))
 
@@ -683,9 +698,16 @@ class WebViewServer:
                             server.hub.publish("progress", {"pct": pct, "status": status}))
                         return self._json(result)
                     except Exception as e:
-                        log_error(f"识别失败：{primary_name}", exc=e)
-                        head = str(e).splitlines()[0][:300] if str(e) else type(e).__name__
-                        return self._err(500, head)
+                        # A9 护栏等业务拒绝带 status=400：WARN 一行即可，
+                        # 其余仍按 500/ERROR 记录（保持既有排查口径）。
+                        code = getattr(e, "status", 500)
+                        head = (str(e).splitlines()[0][:300]
+                                if str(e) else type(e).__name__)
+                        if code == 400:
+                            log_warn(f"识别被拒绝：{primary_name}（{head}）")
+                        else:
+                            log_error(f"识别失败：{primary_name}", exc=e)
+                        return self._err(code, head, logged=code == 400)
                 finally:
                     shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -711,10 +733,14 @@ class WebViewServer:
                                            {"pct": pct, "status": status}))
                     return self._json(result)
                 except Exception as e:
-                    log_error(f"识别失败：{primary_name}", exc=e)
-                    head = str(e).splitlines()[0][:300] if str(e) else \
-                        type(e).__name__
-                    return self._err(500, head)
+                    code = getattr(e, "status", 500)
+                    head = (str(e).splitlines()[0][:300] if str(e)
+                            else type(e).__name__)
+                    if code == 400:
+                        log_warn(f"识别被拒绝：{primary_name}（{head}）")
+                    else:
+                        log_error(f"识别失败：{primary_name}", exc=e)
+                    return self._err(code, head, logged=code == 400)
 
         self._httpd = _QuietServer((self.host, self._want_port), _Handler)
         self.port = self._httpd.server_address[1]

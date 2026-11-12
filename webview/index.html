@@ -65,6 +65,14 @@
       <div data-i18n="mode.offlineBanner">Backend unreachable — demo mode is on; recognition and settings are disabled. Start the app from the desktop shortcut.</div>
     </div>
 
+    <!-- 错误置顶（B11）：错误不能只写页面最底部的日志区；这里常驻在 .view-host 之上，
+         任何视图都可见，点右侧 × 关闭（下一次报错会重新出现） -->
+    <div class="banner banner-warn alert-banner" id="alert-banner" role="alert" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
+      <div id="alert-text"></div>
+      <button class="alert-close" id="alert-close" type="button" data-i18n-title="alert.dismiss" data-i18n-aria="alert.dismiss" title="Dismiss" aria-label="Dismiss">×</button>
+    </div>
+
     <div class="view-host">
 
       <!-- ───── 图片识别 ───── -->
@@ -118,7 +126,7 @@
 
         <!-- 识别结果 -->
         <div class="result" id="result" hidden>
-          <div class="sec-title"><span data-i18n="result.title">Recognition result</span> <span class="chip chip-muted" id="result-meta"></span></div>
+          <div class="sec-title"><span data-i18n="result.title">Recognition result</span> <span class="chip chip-muted" id="result-meta"></span><span class="chip chip-warn" id="result-edited" hidden data-i18n="result.edited">Edited</span></div>
           <!-- E3 截断/页数不符提示条（醒目但不阻挡；由 app.js 按响应字段填充） -->
           <div class="banner banner-warn result-warn" id="result-warn" hidden>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
@@ -142,7 +150,7 @@
               </div>
             </div>
             <div class="md-render" id="md-render"></div>
-            <textarea class="input mono md-raw" id="md-raw" hidden readonly></textarea>
+            <textarea class="input mono md-raw" id="md-raw" hidden spellcheck="false"></textarea>
           </div>
         </div>
 

@@ -47,7 +47,10 @@ class LogRotationTest(unittest.TestCase):
         files = self._files()
         self.assertEqual(len(files), 1)
         self.assertRegex(files[0], r"^app-\d{6}\.log$")
-        self.assertIn("[INFO] hello", self._base(files[0][4:10]).read_text(encoding="utf-8"))
+        text = self._base(files[0][4:10]).read_text(encoding="utf-8")
+        # C11：行格式在级别与消息之间插入 pid/线程名，断言按字段拆开
+        self.assertIn("[INFO]", text)
+        self.assertIn("hello", text)
 
     def test_rotates_when_file_exceeds_limit(self):
         for i in range(30):

@@ -7,7 +7,8 @@
   • 单文件超过 MAX_BYTES（默认 8 MiB）时轮转：app-YYYYMM.log → app-YYYYMM.1.log，
     旧档依次后移，最多保留 MAX_BACKUPS（默认 3）份（.1 最新、.3 最旧）。
     轮转失败（文件被占用/只读/磁盘满）静默降级为继续追加，绝不抛异常。
-  • 行格式：`2026-10-27 16:20:33 [INFO] 识别完成 …`。
+  • 行格式：`2026-10-27 16:20:33 [INFO] [pid=1234 MainThread] 识别完成 …`
+    （pid 与线程名便于多开/并发排查；线程名超过 _THREAD_NAME_MAX 截断）。
   • 写日志永不抛异常——磁盘满/权限问题静默忽略，绝不影响主流程。
 """
 from __future__ import annotations
@@ -30,6 +31,9 @@ _ROTATE_FAILED_MONTH = ""      # 本月轮转已失败 → 本月不再重试，
 # 轮转阈值/份数（configure() 可覆盖：测试用；应用本身不改）
 MAX_BYTES = 8 * 1024 * 1024
 MAX_BACKUPS = 3
+
+# 线程名截断长度：除 MainThread 外还有 ocr-ticker 等任务线程，名字可能很长
+_THREAD_NAME_MAX = 24
 
 
 def _base_dir() -> Path:
@@ -130,10 +134,22 @@ def _rotate_locked(month: str) -> IO[str] | None:
         return _open_locked(month)
 
 
+def _thread_tag() -> str:
+    """`[pid=1234 MainThread]`：进程 + 线程上下文（多开/并发排查用）。"""
+    name = threading.current_thread().name or "MainThread"
+    if len(name) > _THREAD_NAME_MAX:
+        name = name[:_THREAD_NAME_MAX]
+    return f"[pid={os.getpid()} {name}]"
+
+
 def _write(level: str, msg: str):
     global _FH_BYTES
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = f"{ts} [{level}] {msg}\n"
+    try:
+        tag = _thread_tag()
+    except Exception:
+        tag = "[pid=? ?]"
+    line = f"{ts} [{level}] {tag} {msg}\n"
     # 文本模式在 Windows 会把 \n 写成 \r\n，按实际落盘字节数估算
     nbytes = len(line.encode("utf-8")) + line.count("\n")
     try:
@@ -184,3 +200,39 @@ def log_ocr(msg: str):
 def log_model(msg: str):
     """模型加载事件。"""
     _write("MODEL", msg)
+
+
+def log_startup(extra: str = "") -> None:
+    """进程启动头（C11）：版本 / pid / python / frozen / 平台 / cwd（+ extra）。
+
+    version / platform / sys 在函数内 import：applog 位于启动路径最前端，
+    模块级 import 它们会拖慢冷启动，也容易和 version.py 形成循环依赖。
+    本函数绝不抛异常——日志不可用不能影响启动。
+    """
+    try:
+        import platform
+        import sys as _sys
+
+        try:
+            from version import APP_VERSION as _ver
+        except Exception:
+            _ver = "?"
+        parts = [
+            f"==== 启动 v{_ver}",
+            f"pid={os.getpid()}",
+            f"python={_sys.version.split()[0]}",
+            f"frozen={'是' if getattr(_sys, 'frozen', False) else '否'}",
+        ]
+        try:
+            parts.append(platform.platform())
+        except Exception:
+            parts.append("platform=?")
+        try:
+            parts.append(f"cwd={os.getcwd()}")
+        except Exception:
+            parts.append("cwd=?")
+        if extra:
+            parts.append(str(extra))
+        log_info(" · ".join(parts) + " ====")
+    except Exception:
+        pass

@@ -195,6 +195,27 @@ function sanitizeHtmlFragment(html) {
 function flash(msg) {
   logLine(msg);
 }
+
+/* ── 错误置顶（B11）────────────────────────────────────────
+   错误只写页面最底部的 #ocr-log 时，用户体感是「点了没反应」：
+   日志区要滚到底才看得见，进度条 1.5 s 后还会自己收起。
+   这里让错误同时出现在顶部常驻横幅（可关闭），日志继续留档以便排查；
+   成功类提示只进日志，不要弹横幅。 */
+function showAlert(msg) {
+  const box = $("#alert-banner");
+  if (!box) return;
+  const text = String(msg == null ? "" : msg).trim();
+  if (!text) { box.hidden = true; return; }
+  $("#alert-text").textContent = text;
+  box.hidden = false;
+}
+function hideAlert() { showAlert(""); }
+function flashError(msg) {
+  flash(msg);
+  showAlert(msg);
+}
+$("#alert-close")?.addEventListener("click", hideAlert);
+
 const logLines = [];
 function logLine(msg) {
   const ts = new Date().toLocaleTimeString(window.I18N.localeTag(), { hour12: false });
@@ -323,6 +344,12 @@ function renderRunButtons() {
   $("#btn-run").disabled = !ready || state.running || !hasInput;
   $("#btn-cancel").disabled = !state.running;
   $("#btn-open-dir").disabled = false;
+  // F15：运行中冻结输入区——改了也不生效的控件必须在视觉上锁住，
+  // 否则用户会以为新文件/新提示词已经进到本次识别里。
+  $("#prompt-box").disabled = state.running;
+  $("#btn-pick").disabled = state.running;
+  $("#btn-pick-dir").disabled = state.running;
+  $("#btn-clear-files").disabled = state.running;
 }
 
 /* ── 识别页：文件选择 ─────────────────────────────────── */
@@ -332,6 +359,7 @@ const hiddenFile = $("#hidden-file");
 drop.addEventListener("click", e => {
   // 拖放区内的按钮各自处理点击，不要把「选文件夹」也当成「选文件」
   if (e.target.closest("#btn-pick") || e.target.closest("#btn-pick-dir")) return;
+  if (state.running) { flash(t("msg.runningLocked")); return; }
   hiddenFile.click();
 });
 $("#btn-pick").addEventListener("click", () => hiddenFile.click());
@@ -357,17 +385,30 @@ document.addEventListener("drop", e => {
   flash(t("msg.dropOutside"));
 });
 
+/* F7：同一文件重复拖入/重复选择会重复识别、重复占页序，按「名 | 大小 | 修改时间」去重。
+   lastModified 让同名但内容不同的文件仍能加入；老 File 对象没有该字段时退回 0。 */
+function fileKey(f) {
+  return `${f.name}|${f.size}|${f.lastModified || 0}`;
+}
+
 function addFiles(list) {
+  if (state.running) { flash(t("msg.runningLocked")); return; }
   let rejected = 0;
+  let duplicated = 0;
+  const seen = new Set(state.files.map(fileKey));
   for (const f of list) {
     const ext = f.name.split(".").pop()?.toLowerCase() || "";
     // GIF 不支持（动图只读得到第一帧），MIME / 扩展名两条路都拦掉
     const ok = (f.type.startsWith("image/") && ext !== "gif")
       || state.knownExts.has(ext);
     if (!ok) { rejected++; continue; }
+    const key = fileKey(f);
+    if (seen.has(key)) { duplicated++; continue; }
+    seen.add(key);
     state.files.push(f);
   }
   if (rejected) flash(t("msg.skippedFiles", { n: rejected }));
+  if (duplicated) flash(t("msg.duplicateFiles", { n: duplicated }));
   renderFiles();
 }
 
@@ -406,12 +447,15 @@ function renderFiles() {
 $("#file-list").addEventListener("click", e => {
   const x = e.target.closest(".x");
   if (!x) return;
+  // F15：运行中删文件不会影响本次识别，只会让界面对不上，直接拒绝
+  if (state.running) { flash(t("msg.runningLocked")); return; }
   const i = +x.dataset.i;
   if (x.dataset.kind === "path") state.pathFiles.splice(i, 1);
   else state.files.splice(i, 1);
   renderFiles();
 });
 $("#btn-clear-files").addEventListener("click", () => {
+  if (state.running) { flash(t("msg.runningLocked")); return; }
   state.files = [];
   state.pathFiles = [];
   renderFiles();
@@ -421,7 +465,7 @@ $("#btn-clear-files").addEventListener("click", () => {
 /* ── 目录识别（S3）：选目录 → scan-dir → 加入待识别列表（JSON 直读路径）── */
 const DIR_SCAN_MAX = 200;   // 与后端 MAX_RECOGNIZE_PATHS 对齐，避免扫描后一次识别被拒
 async function pickDirectory() {
-  if (state.running) return;
+  if (state.running) { flash(t("msg.runningLocked")); return; }
   if (API.mode !== "web") { flash(t("msg.scanNeedsBackend")); return; }
   const room = DIR_SCAN_MAX - state.pathFiles.length;
   if (room <= 0) { flash(t("msg.dirLimitReached", { n: DIR_SCAN_MAX })); return; }
@@ -488,6 +532,7 @@ async function runOcr() {
   if (paths.length > DIR_SCAN_MAX) { flash(t("msg.dirLimitReached", { n: DIR_SCAN_MAX })); return; }
   state.running = true;
   state.batchSource = paths.length ? "paths" : "files";
+  hideAlert();                       // 新一轮识别开始：上一轮的报错横幅先收起
   renderRunButtons();
   $("#progress").hidden = false;
   setProgress(2, paths.length ? t("prog.reading") : t("prog.uploading"));
@@ -519,7 +564,7 @@ async function runOcr() {
       logResultWarnings(result);
     }
   } catch (e) {
-    flash(t("msg.failed", { err: e.message || e }));
+    flashError(t("msg.failed", { err: e.message || e }));
     setProgress(0, t("prog.failed"));
   } finally {
     state.running = false;
@@ -736,12 +781,18 @@ function renderResultText() {
   const r = state.lastResult;
   if (!r) return;
   const pages = r.pages || [];
+  const multi = pages.length > 1;
+  // 「全部」视图展示的是合并后的整篇内容（含 <!-- page N --> 标记），
+  // 逐页编辑会在切页时与页数组打架，所以这一档只读；单页/逐页视图可编辑。
+  const readOnlyAll = multi && state.curPage === -1;
   let text = r.text || "";
-  if (state.curPage >= 0 && pages.length > 1) text = pages[state.curPage] || "";
+  if (state.curPage >= 0 && multi) text = pages[state.curPage] || "";
   if (state.resultMode === "raw") {
     $("#md-render").hidden = true;
     const raw = $("#md-raw");
     raw.hidden = false;
+    raw.readOnly = readOnlyAll;
+    raw.title = readOnlyAll ? t("result.editAllHint") : "";
     raw.value = text;
   } else {
     $("#md-raw").hidden = true;
@@ -749,7 +800,61 @@ function renderResultText() {
     box.hidden = false;
     box.innerHTML = mdToHtml(text);
   }
+  updateEditedChip();
 }
+
+/* ── B9 结果可编辑：编辑只落在「当前页」（单页即唯一页）上 ──────────
+   回写 state.lastResult 时，多页必须按后端同一格式重拼 text：
+   `<!-- page N -->` 标记 + 空行连接（见 ocr_engine.py 的合并输出），
+   否则分页、复制、保存会各说各话。整篇视图（curPage=-1）保持只读。 */
+function resultMetaText(r) {
+  const pages = r.pages || [];
+  return r.elapsed == null
+    ? t("result.historyMeta", { chars: (r.text || "").length })
+    : t("result.pageMeta", {
+        n: pages.length || 1,
+        chars: (r.text || "").length,
+        time: fmtTime(r.elapsed),
+      });
+}
+function updateResultMeta() {
+  const r = state.lastResult;
+  if (r) $("#result-meta").textContent = resultMetaText(r);
+}
+function updateEditedChip() {
+  const chip = $("#result-edited");
+  if (chip) chip.hidden = !(state.lastResult && state.lastResult.edited);
+}
+function rebuildMergedText(pages) {
+  return pages.map((txt, i) => `<!-- page ${i + 1} -->\n${txt}`).join("\n\n");
+}
+function applyResultEdit(value) {
+  const r = state.lastResult;
+  if (!r) return;
+  const pages = Array.isArray(r.pages) ? r.pages : [];
+  // 整篇视图只读：多页合并内容不能整段覆盖回单页
+  if (pages.length > 1 && state.curPage === -1) return;
+  if (pages.length > 1) {
+    if (state.curPage < 0 || state.curPage >= pages.length) return;
+    pages[state.curPage] = value;
+    r.text = rebuildMergedText(pages);
+  } else {
+    r.pages = [value];
+    r.text = value;
+  }
+  r.edited = true;
+  // 批量模式：逐文件结果也要写回，否则切到别的条目再切回来，编辑就丢了
+  const it = state.batchItems && state.batchItems[state.viewIndex];
+  if (it && it.ok) {
+    it.text = r.text;
+    it.pages = r.pages || [r.text];
+    it.edited = true;
+    it.chars = (r.text || "").length;
+  }
+  updateEditedChip();
+  updateResultMeta();
+}
+$("#md-raw").addEventListener("input", e => applyResultEdit(e.target.value));
 
 /* ── 批量模式：逐文件结果 ─────────────────────────────────── */
 function firstLine(s) {
@@ -817,6 +922,7 @@ function viewBatchItem(i) {
     // 没有可复制/保存的正文：禁用按钮，避免复制到上一次的结果
     $("#btn-copy").disabled = true;
     $("#btn-save").disabled = true;
+    $("#result-edited").hidden = true;   // B9：失败项没有可编辑正文
     showBatchError(it);
     return;
   }
@@ -828,6 +934,7 @@ function viewBatchItem(i) {
     text: it.text, pages: it.pages || [it.text], outPath: it.outPath, elapsed: it.elapsed,
     truncated: !!it.truncated, pagesMismatch: !!it.pagesMismatch,
     finishReason: it.finishReason || it.finish_reason || "",
+    edited: !!it.edited,
   };
   state.curPage = 0;
   showResultPages();
@@ -848,13 +955,7 @@ function showResultPages() {
     tabs.innerHTML = "";
     state.curPage = 0;
   }
-  $("#result-meta").textContent = r.elapsed == null
-    ? t("result.historyMeta", { chars: (r.text || "").length })
-    : t("result.pageMeta", {
-        n: pages.length || 1,
-        chars: (r.text || "").length,
-        time: fmtTime(r.elapsed),
-      });
+  updateResultMeta();
   renderResultText();
 }
 
@@ -915,6 +1016,7 @@ async function retryFailedItems() {
   }
   if (!targets.length) { flash(t("msg.retryNoSource")); return; }
   state.running = true;
+  hideAlert();
   renderRunButtons();
   $("#btn-retry-failed").disabled = true;
   $("#progress").hidden = false;
@@ -940,7 +1042,7 @@ async function retryFailedItems() {
     showBatchResult(agg);
     logResultWarnings(agg);
   } catch (e) {
-    flash(t("msg.genericFailed", { err: e.message || e }));
+    flashError(t("msg.genericFailed", { err: e.message || e }));
   } finally {
     state.running = false;
     renderRunButtons();
@@ -961,10 +1063,15 @@ $("#btn-copy").addEventListener("click", async () => {
     await navigator.clipboard.writeText(text);
     flash(t("msg.copied"));
   } catch {
-    const ta = document.createElement("textarea");
-    ta.value = text; document.body.appendChild(ta);
-    ta.select(); document.execCommand("copy"); ta.remove();
-    flash(t("msg.copied"));
+    // 剪贴板 API 在非安全上下文/无权限时会拒绝：退回 execCommand，两条路都失败才报错
+    let copied = false;
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text; document.body.appendChild(ta);
+      ta.select(); copied = document.execCommand("copy"); ta.remove();
+    } catch { copied = false; }
+    if (copied) flash(t("msg.copied"));
+    else flashError(t("msg.genericFailed", { err: "clipboard" }));
   }
 });
 /* 纯文本导出：与后端 _md_to_plain 同规则的 JS 版 */
@@ -990,17 +1097,21 @@ $("#btn-save").addEventListener("click", () => {
   const text = state.curPage >= 0 && (r.pages || []).length > 1
     ? r.pages[state.curPage] : r.text;
   const fmt = (state.settings && state.settings.outFormat) === "txt" ? "txt" : "md";
-  const content = fmt === "txt" ? mdToPlain(text) : text;
-  const base = (r.outPath ? r.outPath.split(/[\\/]/).pop() : "ocr-result")
-    || "ocr-result";
-  const blob = new Blob([content], {
-    type: fmt === "txt" ? "text/plain;charset=utf-8" : "text/markdown;charset=utf-8",
-  });
-  const a = $("#download-link");
-  a.href = URL.createObjectURL(blob);
-  a.download = base.replace(/\.(md|txt)$/i, "") + "." + fmt;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  try {
+    const content = fmt === "txt" ? mdToPlain(text) : text;
+    const base = (r.outPath ? r.outPath.split(/[\\/]/).pop() : "ocr-result")
+      || "ocr-result";
+    const blob = new Blob([content], {
+      type: fmt === "txt" ? "text/plain;charset=utf-8" : "text/markdown;charset=utf-8",
+    });
+    const a = $("#download-link");
+    a.href = URL.createObjectURL(blob);
+    a.download = base.replace(/\.(md|txt)$/i, "") + "." + fmt;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  } catch (e) {
+    flashError(t("msg.genericFailed", { err: e.message || e }));
+  }
 });
 $("#btn-open-dir").addEventListener("click", () => API.openOutputDir());
 
@@ -1153,11 +1264,11 @@ $("#btn-model-download").addEventListener("click", async () => {
   try {
     const r = await API.startDownload();
     if (!r || !r.ok) {
-      flash((r && r.error) || t("msg.cannotDownload"));
+      flashError((r && r.error) || t("msg.cannotDownload"));
       $("#btn-model-cancel").hidden = true;
     }
   } catch (e) {
-    flash(t("msg.genericFailed", { err: e.message || e }));
+    flashError(t("msg.genericFailed", { err: e.message || e }));
     $("#btn-model-cancel").hidden = true;
   }
 });
@@ -1169,12 +1280,12 @@ $("#btn-model-load").addEventListener("click", async () => {
   try {
     const r = await API.startLoad();
     if (!r || !r.ok) {
-      flash((r && r.error) || t("msg.cannotLoad"));
+      flashError((r && r.error) || t("msg.cannotLoad"));
       $("#model-progress").hidden = true;
       $("#btn-model-cancel").hidden = true;
     }
   } catch (e) {
-    flash(t("msg.genericFailed", { err: e.message || e }));
+    flashError(t("msg.genericFailed", { err: e.message || e }));
     $("#model-progress").hidden = true;
     $("#btn-model-cancel").hidden = true;
   }
@@ -1235,7 +1346,8 @@ function renderFlavorCard() {
   list.querySelectorAll("input[name=flavor]").forEach(r => r.addEventListener("change", async () => {
     state.envFlavor = r.value;
     renderFlavorCard();
-    try { await API.setEnvFlavor(r.value); } catch {}
+    try { await API.setEnvFlavor(r.value); }
+    catch (e) { flashError(t("msg.genericFailed", { err: e.message || e })); }
   }));
 
   // 状态 chip 与按钮
@@ -1259,19 +1371,19 @@ function renderFlavorCard() {
 $("#btn-flavor-download").addEventListener("click", async () => {
   const env = state.env;
   const pick = state.envFlavor || env?.selected || env?.recommended;
-  if (!pick) { flash(t("env.pickFirst")); return; }
+  if (!pick) { flashError(t("env.pickFirst")); return; }
   $("#flavor-progress").hidden = false;
   setFlavorProgress(0, t("model.prepDownload"));
   try {
     const r = await API.startEnvDownload(pick);
     if (!r || !r.ok) {
-      flash((r && r.error) || t("msg.cannotLoad"));
+      flashError((r && r.error) || t("msg.cannotLoad"));
       $("#flavor-progress").hidden = true;
       return;
     }
     if (r.already) { $("#flavor-progress").hidden = true; loadEnv(); }
   } catch (e) {
-    flash(t("msg.genericFailed", { err: e.message || e }));
+    flashError(t("msg.genericFailed", { err: e.message || e }));
     $("#flavor-progress").hidden = true;
   }
 });
@@ -1381,7 +1493,7 @@ async function flushSettings() {
   try {
     const s = await API.setSettings(patch);
     if (!s || s.ok === false) {
-      flash((s && s.error) || t("msg.genericFailed", { err: "settings" }));
+      flashError((s && s.error) || t("msg.genericFailed", { err: "settings" }));
       return;
     }
     fillSettings(s);
@@ -1389,7 +1501,7 @@ async function flushSettings() {
     applyStatus(st);
     flash(t("msg.settingsSaved"));
   } catch (e) {
-    flash(t("msg.genericFailed", { err: e.message || e }));
+    flashError(t("msg.genericFailed", { err: e.message || e }));
   }
 }
 $("#set-model-dir").addEventListener("change", () => pushSettings({ modelDir: $("#set-model-dir").value.trim() }));

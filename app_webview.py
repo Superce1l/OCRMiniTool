@@ -29,6 +29,25 @@ WIN_W, WIN_H = 1024, 720
 MIN_W, MIN_H = 900, 640
 
 
+def _log(level: str, msg: str) -> None:
+    """applog 兜底调用：import 或写日志任何异常都不得影响启动与窗口。"""
+    try:
+        import applog
+        fn = applog.log_warn if level == "warn" else applog.log_info
+        fn(msg)
+    except Exception:
+        pass
+
+
+def _log_startup(extra: str = "") -> None:
+    """写启动 header（版本/pid/python/frozen/平台/cwd）；同样绝不抛。"""
+    try:
+        import applog
+        applog.log_startup(extra)
+    except Exception:
+        pass
+
+
 # ════════════════════════════════════════════════════════
 # 屏幕适配：启动时按工作区收敛窗口尺寸（与 STTMiniTool 同一套实现）
 # ════════════════════════════════════════════════════════
@@ -362,7 +381,8 @@ def _autoload_model_when_ready(srv) -> None:
 def run_native_window(url: str, on_start=None) -> bool:
     try:
         import webview
-    except Exception:
+    except Exception as e:
+        _log("warn", f"pywebview 不可用，改用 Edge：{e}")
         return False
     try:
         try:
@@ -389,11 +409,13 @@ def run_native_window(url: str, on_start=None) -> bool:
 
         window.events.closing += _on_closing
         _decorate_window_async()
+        _log("info", f"原生 WebView2 窗口已创建：{url}")
         # 回调在 GUI 线程之外的新线程里跑：窗口先可见，再开始吃 CPU 加载
         webview.start(on_start) if on_start else webview.start()
         return True
     except Exception as e:
         print(f"[{APP_NAME}] 原生窗口失败，改用 Edge：{e}")
+        _log("warn", f"原生窗口失败，改用 Edge：{e}")
         return False
 
 
@@ -430,9 +452,12 @@ def open_edge_app(url: str) -> subprocess.Popen | None:
         try:
             proc = subprocess.Popen(args, creationflags=flags)
             _decorate_window_async()
+            _log("info", f"使用 Edge --app 窗口：{url}")
             return proc
-        except Exception:
-            pass
+        except Exception as e:
+            _log("warn", f"Edge --app 启动失败，回退默认浏览器：{e}")
+    else:
+        _log("warn", "未找到 Edge，回退默认浏览器")
     webbrowser.open(url)
     return None
 
@@ -450,6 +475,10 @@ def main():
         unblock_app_files()
     except Exception:
         pass
+
+    # 启动头（C11）：版本/pid/python/frozen/平台/cwd。放在 reexec 之前，
+    # 这样"按设置里的解释器重挂"前后两个进程都会各留一行，便于对照。
+    _log_startup()
 
     # 设置里指定了自定义 Python 解释器 → 先重挂再干别的（此时还没起 server、
     # 没自动加载模型，本进程拉起新进程后即刻退出）。
@@ -471,6 +500,7 @@ def main():
     srv = WebViewServer(host="127.0.0.1", port=0)
     srv.start()
     _BACKEND_REF[0] = srv.backend
+    _log("info", f"服务已启动：{srv.url}")
 
     # 窗口标题/退出弹窗按 settings.json 的语言（WebBackend 构造时已 set_lang）
     global APP_NAME
@@ -492,6 +522,7 @@ def main():
     has_wv2 = webview2_available()
     if not has_wv2:
         print(f"[{APP_NAME}] 未检测到 WebView2 Runtime，改用 Edge --app 窗口。")
+        _log("warn", "未检测到 WebView2 Runtime，改用 Edge --app 窗口")
     native_url = url + ("&" if "?" in url else "?") + "native=1"
     native_ok = has_wv2 and run_native_window(
         native_url, on_start=lambda: _autoload_model_when_ready(srv))

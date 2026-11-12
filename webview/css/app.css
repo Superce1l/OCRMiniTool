@@ -499,6 +499,15 @@ textarea.input { resize: vertical; min-height: 56px; font-size: 13px; line-heigh
 .banner-info { background: var(--accent-tint); border: 1px solid var(--accent-soft); color: var(--accent-strong); }
 /* 后端不可达时常驻横幅（位于 topbar 之下、.view-host 之上，不随视图滚动） */
 .mode-banner { margin: 12px 28px 0; flex: 0 0 auto; }
+/* 错误置顶（B11）：与 mode-banner 同层级；内容可换行，右侧固定关闭按钮 */
+.alert-banner { margin: 12px 28px 0; flex: 0 0 auto; align-items: center; }
+#alert-text { flex: 1; min-width: 0; word-break: break-word; }
+.alert-close {
+  appearance: none; border: 0; background: transparent; color: inherit;
+  font: inherit; font-size: 18px; line-height: 1; cursor: pointer;
+  opacity: .75; padding: 0 2px; flex: 0 0 auto;
+}
+.alert-close:hover, .alert-close:focus-visible { opacity: 1; }
 
 .dev-list { display: flex; flex-direction: column; gap: 8px; }
 .dev {
