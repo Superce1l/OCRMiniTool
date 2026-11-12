@@ -308,6 +308,24 @@ class _EventHub:
                 pass
 
 
+class _QuietServer(ThreadingHTTPServer):
+    """客户端正常断线（关页面/刷新）不应该在日志里留下一整段栈。
+
+    实测（真机 GUI 关窗、浏览器刷新）：keep-alive 连接复用中客户端先关闭，
+    server 的 handler 线程在 readline 上撞到 ConnectionAbortedError
+    (WinError 10053)，socketserver 会把它当"处理请求异常"打印整段 traceback。
+    连接已经死了，这不是错误；按连接类异常静默掉，其余异常照常上报。
+    """
+
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
+
 class WebViewServer:
     """本机前端服务器。持有 WebBackend + EventHub。"""
 
@@ -698,7 +716,7 @@ class WebViewServer:
                         type(e).__name__
                     return self._err(500, head)
 
-        self._httpd = ThreadingHTTPServer((self.host, self._want_port), _Handler)
+        self._httpd = _QuietServer((self.host, self._want_port), _Handler)
         self.port = self._httpd.server_address[1]
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         self._thread.start()

@@ -247,6 +247,10 @@ def check_eol():
     mixed = []
     for p in iter_files((".py", ".js", ".css", ".html", ".json", ".md",
                          ".txt", ".spec", ".bat")):
+        # settings.json 是运行时用户数据（.gitignore 已忽略），由程序反复改写；
+        # 旧版本程序用 write_text 会写成 CRLF，不该让体检因此报警。
+        if p.name == "settings.json" and p.parent == ROOT:
+            continue
         try:
             b = p.read_bytes()
         except OSError:

@@ -467,7 +467,8 @@ class WebBackend:
                 return {"ok": False, "error": tr("err.envBusy")}
             if not quick_check(self._model_dir()):
                 return {"ok": False, "error": tr("err.modelMissing")}
-            if not quick_check_torch(self._torch_flavor(persist=True)):
+            if not (quick_check_torch(self._torch_flavor(persist=True))
+                    or self._torch_from_source_env()):
                 return {"ok": False, "error": tr("err.noTorchComponent")}
             self.loading = True
             self._task_label = tr("task.load")
@@ -534,9 +535,30 @@ class WebBackend:
                 log_error("保存推荐组件类型失败", exc=e)
         return rec
 
+    def _torch_from_source_env(self) -> bool:
+        """源码运行时，torch 来自 venv（README 的 `pip install -r requirements.txt`）。
+
+        冻结版必须走 runtime/ 组件（安装包不含 torch）；但源码运行没有 runtime/
+        目录，若只认组件标记，用户点「加载模型」会直接被告知"尚未安装推理引擎
+        组件"——组件是打包发行版的机制，源码用户按文档装好依赖后仍被挡住。
+        真机实测复现（v1.3.0：venv 有 torch 2.8.0+cpu 却无法加载模型）。
+        """
+        if getattr(sys, "frozen", False):
+            return False
+        import importlib.util as _ilu
+        try:
+            spec = _ilu.find_spec("torch")
+        except (ImportError, ValueError):
+            return False
+        return bool(spec and spec.origin)
+
     def env_ready(self) -> bool:
-        """推理引擎组件是否就绪（app 启动时决定要不要自动加载模型）。"""
-        return quick_check_torch(self._torch_flavor())
+        """推理引擎是否就绪（app 启动时决定要不要自动加载模型）。
+
+        两条合法来源：① 冻结版的 runtime/ 组件；② 源码运行的 venv torch。
+        """
+        return (quick_check_torch(self._torch_flavor())
+                or self._torch_from_source_env())
 
     def env_status(self) -> dict:
         """硬件检测 + 组件菜单 + 安装状态（前端「推理引擎」卡片渲染）。"""

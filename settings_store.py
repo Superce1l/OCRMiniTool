@@ -146,8 +146,10 @@ class SettingsStore:
         if self._existed:
             data[_VERSION_KEY] = SCHEMA_VERSION
         tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                       encoding="utf-8")
+        # newline="\n"：Windows 上 write_text 默认把 \n 翻成 \r\n，会让
+        # settings.json 在 LF 仓库里恒显示为"被改写"（真机跑一次即复现）。
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(data, ensure_ascii=False, indent=2))
         os.replace(tmp, self.path)
         try:
             st = self.path.stat()
