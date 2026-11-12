@@ -1,4 +1,4 @@
-"""motw_unblock.py — 启动时自清程序目录的 Mark-of-the-Web（onedir 发行版必需）
+r"""motw_unblock.py — 启动时自清程序目录的 Mark-of-the-Web（onedir 发行版必需）
 
 背景
 ----

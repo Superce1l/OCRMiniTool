@@ -123,7 +123,7 @@ def available_languages() -> list[dict]:
 def set_lang(lang: str | None) -> str:
     """设置当前语言（en | zh | locales/ 里的任意语言；auto 按系统语言解析）。
 
-    未知语言（目录里也没有对应 JSON）回退 en。
+    未知语言（目录里也没有对应 JSON）回退 FALLBACK_LANG（zh）。
     """
     global _lang
     lang = (lang or "").strip().lower()
@@ -145,8 +145,8 @@ def get_lang() -> str:
 def tr(key: str, **params) -> str:
     """取当前语言的文案；{param} 占位符用 params 填充。
 
-    当前语言缺 key 时回退 en，再缺则原样返回 key（便于发现漏翻）。
-    注意：文案里不要出现字面 { }（str.format 约束）。
+    当前语言缺 key 时回退 FALLBACK_LANG（zh），再缺则原样返回 key
+    （便于发现漏翻）。注意：文案里不要出现字面 { }（str.format 约束）。
     """
     text = _load(get_lang()).get(key)
     if text is None:

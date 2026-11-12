@@ -26,6 +26,7 @@ import argparse
 import json
 import re
 import shutil
+import warnings as _warnings
 import subprocess
 import sys
 from pathlib import Path
@@ -72,7 +73,16 @@ def check_python():
             err(f"[py] {rel(p)} 不是 UTF-8：{e}")
             continue
         try:
-            compile(src, str(p), "exec")
+            # SyntaxWarning 也当错误：`\P` 这类无效转义在 3.12 只是警告，
+            # 后续 Python 版本会升级成 SyntaxError（实测 motw_unblock.py 中招）
+            with _warnings.catch_warnings(record=True) as caught:
+                _warnings.simplefilter("always")
+                compile(src, str(p), "exec")
+            for w in caught:
+                if issubclass(w.category, SyntaxWarning):
+                    loc = f":{w.lineno}" if getattr(w, "lineno", None) else ""
+                    err(f"[py] {rel(p)}{loc} 潜在缺陷（{w.category.__name__}）："
+                        f"{w.message}")
         except SyntaxError as e:
             err(f"[py] {rel(p)}:{e.lineno} 语法错误：{e.msg}")
     if n == 0:
