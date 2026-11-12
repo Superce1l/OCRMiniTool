@@ -707,11 +707,20 @@ def download_torch(flavor: str, progress_cb=None, cancel_check=None,
 
     if progress_cb:
         progress_cb(0.9, tr("env.extractProgress"))
-    _extract_zip_checked(zip_path, RUNTIME_DIR,
-                         cancel_check=cancel_check,
-                         progress_cb=lambda d, t: progress_cb(
-                             0.9 + 0.1 * d / max(t, 1), tr("env.extractProgress"))
-                         if progress_cb else None)
+    try:
+        _extract_zip_checked(zip_path, RUNTIME_DIR,
+                             cancel_check=cancel_check,
+                             progress_cb=lambda d, t: progress_cb(
+                                 0.9 + 0.1 * d / max(t, 1), tr("env.extractProgress"))
+                             if progress_cb else None)
+    except Exception:
+        # 解压/安装失败不留安装包：真机实测「覆盖被占用的 pyd」失败后会白留
+        # 3.5 GB 的 zip，且 marker 仍是旧组件，用户看不出发生了什么。
+        try:
+            zip_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     try:
         zip_path.unlink(missing_ok=True)     # 装完即删安装包（3GB 不留盘）
     except OSError:

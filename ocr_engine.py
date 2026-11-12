@@ -325,6 +325,40 @@ def _log_infer(stats: dict, n_images: int):
 _MODEL_MAX_CONTEXT = 131072          # config.json 的 max_position_embeddings
 _PAGE_TOKENS_FLOOR, _PAGE_TOKENS_CEIL = 256, 65536
 
+# CUDA 显存下限（GB）。真机实测（GTX 1660 SUPER 6144 MiB + cu128）：
+# 6.3 GB 权重能加载（WDDM 允许超卖到共享内存），VRAM 峰值 5875/6144，
+# 但代价是性能悬崖——小图 32s（与 CPU 30s 持平）、长图 1017s / 1.6 tok/s，
+# 比 CPU fp32 还慢。8 GB 卡按 README 是推荐档，留 ~1.7 GB 给激活/KV。
+_MIN_CUDA_VRAM_GB = 7.5
+
+
+def _cuda_vram_gb(torch) -> float:
+    """当前 CUDA 设备总显存（GB）。不可用/异常 → 0.0。"""
+    try:
+        if not torch.cuda.is_available():
+            return 0.0
+        return round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1)
+    except Exception:
+        return 0.0
+
+
+def _pick_device(device_pref, cuda_ok, vram_gb) -> tuple:
+    """纯函数：解析设备偏好 → (device, note)。
+
+    note ∈ {"", "vram-low-auto", "vram-low-forced", "cuda-unavailable"}：
+      · auto + 显存不足 → 用 CPU（"vram-low-auto"）
+      · 用户显式选 cuda + 显存不足 → 尊重选择，但打日志（"vram-low-forced"）
+      · 选 cuda 但不可用 → 由调用方转成具体错误（这里返回 "cuda-unavailable"）
+    """
+    if device_pref == "cpu":
+        return "cpu", ""
+    if not cuda_ok:
+        return ("cpu", "") if device_pref != "cuda" else ("cuda", "cuda-unavailable")
+    if vram_gb and vram_gb < _MIN_CUDA_VRAM_GB:
+        return ("cuda", "vram-low-forced") if device_pref == "cuda" \
+            else ("cpu", "vram-low-auto")
+    return "cuda", ""
+
 
 def _normalize_page_tokens(value) -> int:
     """单页生成上限归一：0/None/非法 → 0（不限）；正数夹到 [256, 65536]。"""
@@ -730,15 +764,21 @@ class OcrEngine:
         #     不可见（v1.1.2 发行包即此病），换驱动无用，得换包；
         #   • 否则是有 CUDA 版 torch 但没驱动/没卡，走原 noCudaDevice 提示。
         cuda_ok = bool(torch.cuda.is_available())
-        if device_pref == "cpu":
-            device = "cpu"
-        elif device_pref == "cuda" and not cuda_ok:
+        if device_pref == "cuda" and not cuda_ok:
             if not getattr(torch.version, "cuda", None):
                 raise EngineError(
                     tr("err.torchCpuBuild", ver=torch.__version__))
             raise EngineError(tr("err.noCudaDevice"))
-        else:
-            device = "cuda" if cuda_ok else "cpu"
+        device, note = _pick_device(device_pref, cuda_ok, _cuda_vram_gb(torch))
+        if note:
+            from applog import log_model
+            vram = _cuda_vram_gb(torch) or 0.0
+            if note == "vram-low-auto":
+                log_model(f"显存仅 {vram:.1f} GB < {_MIN_CUDA_VRAM_GB:g} GB，"
+                          f"auto 改用 CPU（fp32 视觉塔），避免显存超卖导致的缓慢")
+            elif note == "vram-low-forced":
+                log_model(f"显存仅 {vram:.1f} GB（建议 ≥{_MIN_CUDA_VRAM_GB:g} GB），"
+                          f"按用户显式选择仍用 CUDA；实测此档位可能比 CPU 更慢")
         _patch_tensor_cuda(device == "cpu")
 
         # 幂等短路（A10）：判定条件必须是「已真正加载 + 设备一致 + 目录一致」，

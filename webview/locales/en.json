@@ -281,5 +281,6 @@
   "msg.retryDone": "Retry finished: {ok}/{n} succeeded",
   "msg.retryNoSource": "Failed files are no longer in the list; cannot retry (they may have been removed)",
   "msg.batchErrorTitle": "Failure details",
-  "prog.reading": "Reading files…"
+  "prog.reading": "Reading files…",
+  "err.envSwitchNeedsRestart": "Switching the inference-engine component requires restarting the app (the current process already loaded the old DLLs, which cannot be overwritten). Quit the app, reopen it, then download the other flavor."
 }

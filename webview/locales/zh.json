@@ -281,5 +281,6 @@
   "msg.retryDone": "重试完成：{ok}/{n} 成功",
   "msg.retryNoSource": "失败文件已不在待识别列表中，无法重试（文件可能已被移除）",
   "msg.batchErrorTitle": "失败原因",
-  "prog.reading": "读取文件…"
+  "prog.reading": "读取文件…",
+  "err.envSwitchNeedsRestart": "环境引擎组件切换需要重启应用（当前进程已加载旧组件的 DLL，无法覆盖）；请先退出程序，重新打开后再下载另一版本。"
 }

@@ -342,7 +342,24 @@ def _confirm_quit_with_task(label: str) -> bool:
     return r == 1
 
 
-def run_native_window(url: str) -> bool:
+def _autoload_model_when_ready(srv) -> None:
+    """窗口出来之后再自动加载模型（真机实测：加载抢在建窗之前会把窗口拖到 20s）。
+
+    模型已下载 + 推理引擎就绪才自动加载；否则停在模型页让用户补齐缺的那块。
+    任何异常都不该影响窗口可用性，因此整体吞掉。
+    """
+    try:
+        if srv.backend.model_files_present() and srv.backend.env_ready():
+            from applog import log_model
+            log_model("自动加载：模型与推理引擎就绪，开始后台加载")
+            srv.backend.start_load()
+        else:
+            print(f"[{APP_NAME}] 模型或推理引擎组件未就绪 → 等使用者在模型页下载。")
+    except Exception:
+        pass
+
+
+def run_native_window(url: str, on_start=None) -> bool:
     try:
         import webview
     except Exception:
@@ -372,7 +389,8 @@ def run_native_window(url: str) -> bool:
 
         window.events.closing += _on_closing
         _decorate_window_async()
-        webview.start()
+        # 回调在 GUI 线程之外的新线程里跑：窗口先可见，再开始吃 CPU 加载
+        webview.start(on_start) if on_start else webview.start()
         return True
     except Exception as e:
         print(f"[{APP_NAME}] 原生窗口失败，改用 Edge：{e}")
@@ -468,16 +486,6 @@ def main():
     except Exception:
         pass
 
-    # 模型已下载且推理引擎组件就绪 → 背景自动加载；否则停在模型页，
-    # 由使用者先补齐缺的那块（组件未装时 load 也只会报「先下载组件」）
-    try:
-        if srv.backend.model_files_present() and srv.backend.env_ready():
-            srv.backend.start_load()
-        else:
-            print(f"[{APP_NAME}] 模型或推理引擎组件未就绪 → 等使用者在模型页下载。")
-    except Exception:
-        pass
-
     url = srv.url
     print(f"[{APP_NAME}] {url}")
 
@@ -485,10 +493,15 @@ def main():
     if not has_wv2:
         print(f"[{APP_NAME}] 未检测到 WebView2 Runtime，改用 Edge --app 窗口。")
     native_url = url + ("&" if "?" in url else "?") + "native=1"
-    native_ok = has_wv2 and run_native_window(native_url)
+    native_ok = has_wv2 and run_native_window(
+        native_url, on_start=lambda: _autoload_model_when_ready(srv))
     try:
         if not native_ok:
             proc = open_edge_app(url)
+            threading.Thread(
+                target=lambda: (time.sleep(2.0),
+                                _autoload_model_when_ready(srv)),
+                name="autoload", daemon=True).start()
             if proc is not None:
                 proc.wait()
             else:

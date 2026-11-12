@@ -603,7 +603,8 @@ class WebBackend:
 
     def start_env_download(self, flavor: str) -> dict:
         """后台下载并安装推理引擎组件（进度走 SSE env-progress 事件）。"""
-        from downloader import _TORCH_VERSION, quick_check_torch, torch_flavors
+        from downloader import _TORCH_VERSION, installed_torch_info, \
+            quick_check_torch, torch_flavors
         if flavor not in torch_flavors():
             return {"ok": False, "error": tr("env.unknownFlavor", flavor=flavor)}
         with self._lock:
@@ -612,6 +613,14 @@ class WebBackend:
                 return {"ok": False, "error": tr("err.busy")}
             if quick_check_torch(flavor):
                 return {"ok": True, "already": True}
+            # 切换组件（已装 A、要装 B）在运行中必然失败：进程已把旧 runtime 下的
+            # .pyd 当 DLL 载入，Windows 不允许覆盖。真机实测（CPU→cu128）报
+            # PermissionError 覆盖 PIL/_imaging...pyd，marker 不变、还残留 3.5GB
+            # 安装包。这里提前拒绝并说清该怎么办，别让用户等到下载完才失败。
+            cur = installed_torch_info() or {}
+            if (cur.get("flavor") and cur["flavor"] != flavor
+                    and "torch" in sys.modules):
+                return {"ok": False, "error": tr("err.envSwitchNeedsRestart")}
             self.env_downloading = True
             self._task_label = tr("task.envDl")
         self.env_cancel.clear()
