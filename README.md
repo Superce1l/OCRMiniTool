@@ -17,7 +17,16 @@
   PDF 自动逐页转图（pymupdf）
 - 📚 **两种识别模式**：**合并解析**（多文件当作同一文档的多页，一次请求带跨页上下文）
   与 **批量识别**（每个文件独立识别、独立出结果，失败不中断队列，可随时取消）
-- 🔍 **单页 gundam 模式**：单图动态切片（模型原生能力），大版面文档细节更全
+- 🔍 **图像切片三档**：**自动**（长截图按高宽比自动走 base，其余 gundam）/ 强制
+  gundam（动态切片，细节更全）/ 强制 base（快，CPU 上更省）——设置页可选
+- 🧮 **生成限幅 + 自动分组**：单页生成上限（默认 4096 token）与合并页数上限
+  （默认 20 页，超出自动分组、组间可取消）；输出被截断或页数不符时，结果区
+  明确提示「期望 N 页、实际 M 页」并给出该调哪个参数
+- 🧹 **页眉页脚去重**（可选）：书籍/论文扫描件可去掉页眉、页脚、页码噪声
+- 📁 **整目录识别**：选一个文件夹即批量入列（后端直读路径，不上传、不占临时盘）
+- 🔁 **失败可重试**：批量模式下单个文件失败不影响队列，失败项可看完整错误并只重跑失败项
+- 💻 **无头 CLI**：`python cli.py --input <文件/目录> [--json]`，给脚本与自动化用
+  （见 [docs/cli.md](docs/cli.md)）
 - ⬇️ **模型一键下载**：约 6.8 GB 权重从 HuggingFace 下载，支持断点续传、完整性校验、
   镜像站（如 hf-mirror.com）加速
 - 🖥️ **CUDA / CPU 自适应**：有 NVIDIA 显卡自动用 CUDA + bfloat16；否则纯 CPU
@@ -85,6 +94,10 @@
 | **HuggingFace 镜像站** | 直连 huggingface.co 较慢或失败时改用镜像（如 `hf-mirror.com`） |
 | **推理设备** | 自动（有 NVIDIA 用 CUDA）/ CUDA / CPU |
 | **输出格式** | 识别结果自动保存与「保存」按钮导出的文件格式：Markdown（`.md`）/ 纯文本（`.txt`） |
+| **单页生成上限** | 单页最多生成多少 token（默认 4096；0 = 不限）。调小可避免超长页跑几小时，调大可减少长表格被截断 |
+| **合并页数上限** | 合并解析一次请求最多几页（默认 20；0 = 不限）。超出自动分组，组间可取消，但跨组不共享上下文 |
+| **图像切片模式** | 自动 / gundam（细节更全、更慢）/ base（更快）。自动模式下长截图（高宽比 > 3）走 base |
+| **页眉页脚去重** | 丢弃 header / footer / page_number 类布局块。模型误标时可能误删正文，默认关闭 |
 | **外观主题** | 浅色／深色／跟随系统 |
 | **界面缩放** | 调整文字与控件大小 |
 | **界面语言** | 下拉选择（中文默认 / English…）；选项自动发现自 `webview/locales/`，持久化到 `settings.json` 的 `lang` |
@@ -118,11 +131,17 @@ applog.py               # 运行日志
 proc_guard.py           # Windows Job Object（进程退出连带清理）
 motw_unblock.py         # 启动自清 Mark-of-the-Web（onedir 发行版必需）
 version.py              # 版本单一事实来源
+cli.py                  # 无头命令行入口（不开窗口、不起 server；见 docs/cli.md）
 webview/                # 前端（HTML / CSS / JS）
 webview/locales/        # 语言包 en / zh（前后端共用，加语言=加一份 JSON）
 assets/make_icon.py     # 图标生成（Pillow 绘制 → PNG/ICO）
 OCRMiniTool.spec        # PyInstaller onedir 打包配置
 runtime_hook_utf8.py    # 冻结运行时 UTF-8 / 证书修复钩子
+tests/                  # 回归套件（stdlib unittest，385 用例，无需模型/GPU/GUI）
+tools/check.py          # 静态体检（语法/JSON/语言包键对齐/i18n 键引用/行尾）
+tools/normalize_eol.py  # 行尾归一（幂等）
+.github/workflows/ci.yml# CI：测试 + 体检 + 前端消毒器对抗测试
+docs/                   # 探索报告、领域探查、CLI 文档
 ```
 
 ---
@@ -222,6 +241,22 @@ uv pip install --python C:\venvs\ocr-cuda\Scripts\python.exe ^
 ```bash
 python downloader.py [目标目录]     # 不启动界面，直接下载/续传
 ```
+
+### 无头命令行识别（可选）
+
+不开窗口、不起 HTTP server，给脚本 / 流水线 / Agent 用：
+
+```bash
+python cli.py --input 扫描件/ --recursive --out 输出/          # 整目录
+python cli.py --input 合同.pdf --pages 1-3 --format txt        # PDF 指定页
+python cli.py --input 长图.png --crop-mode base --json         # 结构化输出到 stdout
+python cli.py status                                           # 模型/环境状态（不加载模型）
+```
+
+- 参数、`--json` 字段契约、退出码（0 成功 / 1 参数错误 / 2 环境或模型错误 /
+  3 部分失败）见 [docs/cli.md](docs/cli.md)。
+- 仅承诺**源码运行**：打包版是 `console=False`，没有控制台可写；要发布 CLI
+  需要另出一个 `console=True` 的独立 EXE。
 
 ---
 

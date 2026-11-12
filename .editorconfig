@@ -1,0 +1,23 @@
+# 编辑器统一约定（此前缺失，导致工作区源码被整批改成 CRLF、
+# git status 恒显示 19 个文件"全量修改"，真实改动被噪声淹没）。
+# 与 .gitattributes 保持一致：源码一律 LF，Windows 批处理保留 CRLF。
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{js,css,json,yml,yaml}]
+indent_size = 2
+
+[*.md]
+# Markdown 里行尾空格是硬换行，不能自动裁剪
+trim_trailing_whitespace = false
+
+[*.{bat,cmd}]
+end_of_line = crlf

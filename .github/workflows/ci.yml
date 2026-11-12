@@ -1,0 +1,75 @@
+# CI 门禁（D9）。本项目的两类事故都本该在这里被挡住：
+#   • 工作区被编辑器整批改成 CRLF → tools/check.py 的行尾检查会报警；
+#   • motw_unblock.py 的 `\P` 无效转义（3.12 只是 SyntaxWarning）→ check.py 把它当错误；
+#   • locales zh/en 键漂移 → check.py 的键对齐断言。
+#
+# 注意：这里只跑「不需要模型 / 不需要 GPU / 不需要图形界面」的检查。
+# 真实推理与 WebView2 界面必须在真机冒烟（见 docs/拓展与优化探索报告.md §5.1）。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    # 项目只支持 Windows（WebView2 / Job Object / NTFS ADS），因此只在
+    # windows 上跑；把 Linux 也加进来会制造一堆与产品无关的假红。
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 回归测试（225+ 用例，零第三方依赖）
+        shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python tests/run_tests.py
+
+      - name: 静态体检（py/node 语法、JSON、语言包键对齐、版本口径、行尾）
+        if: always()
+        shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python tools/check.py
+
+      - name: 前端消毒器对抗测试（22 条攻击 + 20 条正常渲染）
+        if: always()
+        shell: pwsh
+        run: node tools/frontend_sanitize_check.js
+
+  lint:
+    # 分级治理：只挡「真实错误」级（未定义名/语法/重复定义），不挡风格。
+    # 存量代码清偿后再逐级收紧（见 pyproject.toml 注释）。
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 lint 工具
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check ruff mypy
+
+      - name: ruff（真实错误级）
+        shell: pwsh
+        run: ruff check .
+
+      - name: mypy（纯逻辑层）
+        shell: pwsh
+        continue-on-error: true   # 纯逻辑层之外尚未覆盖，先只做信号
+        run: mypy
