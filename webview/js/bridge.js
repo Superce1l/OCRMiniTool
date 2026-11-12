@@ -122,6 +122,21 @@
       }
       return { ok: false, path: "" };
     },
+    // 目录识别：扫描目录下可识别的图片/PDF（后端直接读盘，避免上传）
+    // opts: {path, recursive?, maxFiles?, maxDepth?}
+    async scanDir(opts) {
+      const body = {
+        path: (opts && opts.path) || "",
+        recursive: opts && opts.recursive !== false,
+        maxFiles: (opts && opts.maxFiles) || 200,
+        maxDepth: (opts && opts.maxDepth) || 4,
+      };
+      if (MODE === "web") {
+        try { return await apiPost("/api/scan-dir", body); }
+        catch (e) { return { ok: false, files: [], count: 0, truncated: false, error: String(e) }; }
+      }
+      return { ok: false, files: [], count: 0, truncated: false, error: "mock" };
+    },
     async probePython(path) {
       if (MODE === "web") { try { return await apiPost("/api/probe-python", { path }); } catch (e) { return { ok: false, error: String(e) }; } }
       return { ok: true, path, version: "3.12.0", torch: "2.13.0+cu128", transformers: "4.52.1", pywebview: "6.0", cuda: true, cudaName: "NVIDIA GeForce RTX (mock)", vramGb: 8.0, depsOk: true };
@@ -201,19 +216,41 @@
   };
 
   async function webRecognize(opts) {
-    if (!opts.files || !opts.files.length) throw new Error(tr("mock.pickImage", null, "请先选择图片"));
-    const fd = new FormData();
-    for (const f of opts.files) fd.append("files", f, f.name);
-    if (opts.prompt) fd.append("prompt", opts.prompt);
-    if (opts.mode) fd.append("mode", opts.mode);
-    emit("progress", { pct: 2, status: tr("prog.uploading", null, "上传中…") });
-    const r = await fetch("/api/recognize", { method: "POST", body: fd });
+    const files = opts.files || [];
+    const paths = opts.paths || [];
+    if (!files.length && !paths.length) {
+      throw new Error(tr("mock.pickImage", null, "请先选择图片"));
+    }
+    let r;
+    if (files.length) {
+      // 上传链路（保持不变）：浏览器里的 File 对象走 multipart
+      const fd = new FormData();
+      for (const f of files) fd.append("files", f, f.name);
+      if (opts.prompt) fd.append("prompt", opts.prompt);
+      if (opts.mode) fd.append("mode", opts.mode);
+      emit("progress", { pct: 2, status: tr("prog.uploading", null, "上传中…") });
+      r = await fetch("/api/recognize", { method: "POST", body: fd });
+    } else {
+      // 目录识别：只给路径，交后端直接读取（不落上传临时目录）
+      emit("progress", { pct: 2, status: tr("prog.reading", null, "读取文件…") });
+      r = await fetch("/api/recognize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          paths,
+          prompt: opts.prompt || "",
+          name: opts.name || "",
+          mode: opts.mode || "",
+        }),
+      });
+    }
     if (!r.ok) {
       let msg = "HTTP " + r.status;
       try { msg = (await r.json()).error?.message || msg; } catch {}
       throw new Error(msg);
     }
-    return r.json();   // {mode, text, pages?, items?, outPath, elapsed, cancelled}
+    return r.json();   // {mode, text, pages?, items?, outPath, elapsed, cancelled,
+                       //  truncated?, pagesMismatch?, finishReason?, groups?, droppedBlocks?}
   }
 
   // ════════════════════════════════════════════════════════
@@ -230,6 +267,7 @@
     },
     settings: {
       modelDir: "", mirror: "", devicePref: "auto", theme: "light", scale: 100, lang: "zh",
+      maxPageTokens: 4096, maxMergedPages: 20, cropMode: "auto", dropHeaders: false,
       languages: window.I18N ? window.I18N.LANGUAGES.slice() : [],
     },
   };

@@ -14,12 +14,14 @@ const t = (k, p) => window.I18N.t(k, p);
 
 const state = {
   view: "ocr",
-  files: [],            // [File]
+  files: [],            // [File] 浏览器上传的文件
+  pathFiles: [],        // [{path,name,size,ext}] 目录扫描加入的文件（走 JSON 直读路径）
   running: false,
   mode: "merged",       // merged | batch
   lastResult: null,     // {text, pages, outPath, elapsed}
   lastBatchResult: null, // 批量模式整包结果（语言切换重渲染用）
   batchItems: null,     // 批量模式的逐文件结果
+  batchSource: "",      // 本轮批量的输入来源："files" | "paths"（失败重试按来源匹配）
   viewIndex: 0,         // 批量模式当前查看的 item 下标
   curPage: 0,
   resultMode: "rendered",
@@ -273,7 +275,10 @@ function retranslate() {
   // Python 探测结果是用 t() 即时生成的，语言切换后必须重渲染（F/I2）
   if (pyUI.lastProbe) renderProbeResult(pyUI.lastProbe);
   if (state.batchItems && state.lastBatchResult) showBatchResult(state.lastBatchResult);
-  else if (state.lastResult) showResultPages();
+  else if (state.lastResult) {
+    renderResultWarn(resultWarnLines(state.lastResult));   // 提示条文案也要跟随语言
+    showResultPages();
+  }
   refreshHistory();
 }
 window.I18N.onChange(retranslate);
@@ -314,7 +319,8 @@ function applyStatus(s) {
 function renderRunButtons() {
   const st = state.status || {};
   const ready = st.modelState === "ready";
-  $("#btn-run").disabled = !ready || state.running || !state.files.length;
+  const hasInput = state.files.length + state.pathFiles.length > 0;
+  $("#btn-run").disabled = !ready || state.running || !hasInput;
   $("#btn-cancel").disabled = !state.running;
   $("#btn-open-dir").disabled = false;
 }
@@ -324,7 +330,8 @@ const drop = $("#drop");
 const hiddenFile = $("#hidden-file");
 
 drop.addEventListener("click", e => {
-  if (e.target.closest("#btn-pick")) return;
+  // 拖放区内的按钮各自处理点击，不要把「选文件夹」也当成「选文件」
+  if (e.target.closest("#btn-pick") || e.target.closest("#btn-pick-dir")) return;
   hiddenFile.click();
 });
 $("#btn-pick").addEventListener("click", () => hiddenFile.click());
@@ -364,23 +371,96 @@ function addFiles(list) {
   renderFiles();
 }
 
+function clipName(name) {
+  name = String(name || "");
+  return name.length > 40 ? name.slice(0, 38) + "…" : name;
+}
+
 function renderFiles() {
   const box = $("#file-list");
-  box.hidden = !state.files.length;
-  box.innerHTML = state.files.map((f, i) => `
+  const uploadChips = state.files.map((f, i) => `
     <span class="file-chip" title="${escapeHtml(t("result.fileTip", { name: f.name, size: fmtSize(f.size) }))}">
-      <span class="fn">${escapeHtml(f.name.length > 40 ? f.name.slice(0, 38) + "…" : f.name)}</span>
+      <span class="fn">${escapeHtml(clipName(f.name))}</span>
       <span class="meta">${fmtSize(f.size)}</span>
-      <button class="x" data-i="${i}" title="${escapeHtml(t("result.remove"))}">×</button>
+      <button class="x" data-kind="file" data-i="${i}" title="${escapeHtml(t("result.remove"))}">×</button>
     </span>`).join("");
+  // 目录来源的文件用虚线 chip 区分，title 显示完整路径
+  const pathChips = state.pathFiles.map((p, i) => `
+    <span class="file-chip dir" title="${escapeHtml(t("result.fileTip", { name: p.path || p.name, size: fmtSize(p.size) }))}">
+      <span class="fn">${escapeHtml(clipName(p.name))}</span>
+      <span class="meta">${fmtSize(p.size)}</span>
+      <button class="x" data-kind="path" data-i="${i}" title="${escapeHtml(t("result.remove"))}">×</button>
+    </span>`).join("");
+  const total = state.files.length + state.pathFiles.length;
+  box.hidden = !total;
+  box.innerHTML = uploadChips + pathChips;
+  const summary = $("#file-summary");
+  summary.hidden = !total;
+  if (total) {
+    const bytes = state.files.reduce((a, f) => a + (f.size || 0), 0)
+      + state.pathFiles.reduce((a, p) => a + (p.size || 0), 0);
+    $("#file-summary-text").textContent = t("files.summary", { n: total, size: fmtSize(bytes) });
+  }
   renderRunButtons();
 }
 $("#file-list").addEventListener("click", e => {
   const x = e.target.closest(".x");
   if (!x) return;
-  state.files.splice(+x.dataset.i, 1);
+  const i = +x.dataset.i;
+  if (x.dataset.kind === "path") state.pathFiles.splice(i, 1);
+  else state.files.splice(i, 1);
   renderFiles();
 });
+$("#btn-clear-files").addEventListener("click", () => {
+  state.files = [];
+  state.pathFiles = [];
+  renderFiles();
+  flash(t("msg.filesCleared"));
+});
+
+/* ── 目录识别（S3）：选目录 → scan-dir → 加入待识别列表（JSON 直读路径）── */
+const DIR_SCAN_MAX = 200;   // 与后端 MAX_RECOGNIZE_PATHS 对齐，避免扫描后一次识别被拒
+async function pickDirectory() {
+  if (state.running) return;
+  if (API.mode !== "web") { flash(t("msg.scanNeedsBackend")); return; }
+  const room = DIR_SCAN_MAX - state.pathFiles.length;
+  if (room <= 0) { flash(t("msg.dirLimitReached", { n: DIR_SCAN_MAX })); return; }
+  const r = await API.browseFolder("");
+  if (!r || !r.ok || !r.path) {
+    if (r && r.error) flash(t("msg.genericFailed", { err: r.error }));
+    return;
+  }
+  const scan = await API.scanDir({
+    path: r.path, recursive: true, maxFiles: DIR_SCAN_MAX, maxDepth: 4,
+  });
+  if (!scan || !scan.ok) {
+    flash(t("msg.scanFailed", { err: (scan && scan.error) || "scan-dir" }));
+    return;
+  }
+  const found = Array.isArray(scan.files) ? scan.files : [];
+  if (!found.length) { flash(t("msg.scanEmpty")); return; }
+  const take = found.slice(0, room);
+  const seen = new Set(state.pathFiles.map(p => p.path));
+  let added = 0;
+  for (const f of take) {
+    if (!f || !f.path || seen.has(f.path)) continue;
+    seen.add(f.path);
+    state.pathFiles.push({
+      path: f.path,
+      name: f.name || String(f.path).split(/[\\/]/).pop(),
+      size: f.size || 0,
+      ext: f.ext || "",
+    });
+    added++;
+  }
+  renderFiles();
+  flash(t("msg.dirScanned", { n: added }));
+  if (scan.truncated || found.length > take.length) {
+    flash(t("msg.dirScanTruncated", { n: state.pathFiles.length }));
+  }
+  if (state.files.length) flash(t("msg.mixedSources"));
+}
+$("#btn-pick-dir").addEventListener("click", pickDirectory);
 
 /* ── 识别模式 ─────────────────────────────────────────── */
 $("#ocr-mode").addEventListener("click", e => {
@@ -399,15 +479,23 @@ $("#btn-cancel").addEventListener("click", async () => {
 });
 
 async function runOcr() {
-  if (state.running || !state.files.length) return;
+  if (state.running) return;
+  const files = state.files;
+  const paths = state.pathFiles.map(p => p.path).filter(Boolean);
+  if (!files.length && !paths.length) return;
+  // 两条链路语义不同（上传临时文件 vs 直读路径），混用会分不清页序，先要求二选一
+  if (files.length && paths.length) { flash(t("msg.mixedSources")); return; }
+  if (paths.length > DIR_SCAN_MAX) { flash(t("msg.dirLimitReached", { n: DIR_SCAN_MAX })); return; }
   state.running = true;
+  state.batchSource = paths.length ? "paths" : "files";
   renderRunButtons();
   $("#progress").hidden = false;
-  setProgress(2, t("prog.uploading"));
+  setProgress(2, paths.length ? t("prog.reading") : t("prog.uploading"));
   const prompt = $("#prompt-box").value.trim();
   try {
     const result = await API.recognize({
-      files: state.files, prompt, mode: state.mode,
+      files, paths, prompt, mode: state.mode,
+      name: paths.length ? baseNameOf(state.pathFiles[0]) : "",
     });
     if (result && !result.cancelled) {
       if (result.mode === "batch" && result.items) {
@@ -427,6 +515,8 @@ async function runOcr() {
         showResult(result);
         flash(t("msg.done", { time: fmtTime(result.elapsed), path: result.outPath || "" }));
       }
+      // E3：截断/页数不符必须有痕迹（结果区提示条 + 日志）
+      logResultWarnings(result);
     }
   } catch (e) {
     flash(t("msg.failed", { err: e.message || e }));
@@ -439,11 +529,100 @@ async function runOcr() {
   }
 }
 
+function baseNameOf(p) {
+  const name = (p && (p.name || p.path)) || "";
+  return String(name).replace(/^.*[\\/]/, "").replace(/\.[^.]+$/, "") || "";
+}
+
 function setProgress(pct, status) {
   const p = Math.max(0, Math.min(100, Math.round((pct || 0) * 100)));
   $("#prog-bar").style.width = p + "%";
   $("#prog-pct").textContent = p + "%";
   if (status != null) $("#prog-status").textContent = status;
+}
+
+/* ── E3 截断/页数不符（S2）────────────────────────────────
+   后端新字段：truncated / pagesMismatch / finishReason / groups / droppedBlocks。
+   字段缺失（后端尚未落地）时按「无问题」处理，不能因此报错或阻止流程。 */
+function numOrNull(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+function truncationInfo(r) {
+  if (!r || typeof r !== "object") return null;
+  const truncated = !!r.truncated;
+  const mismatch = !!r.pagesMismatch;
+  if (!truncated && !mismatch) return null;
+  const expected = numOrNull(r.expectedPages != null ? r.expectedPages : r.expected_pages);
+  const actualRaw = numOrNull(r.actualPages != null ? r.actualPages : r.actual_pages);
+  const actual = actualRaw != null ? actualRaw
+    : (Array.isArray(r.pages) ? r.pages.length : null);
+  return {
+    truncated,
+    mismatch,
+    finish: r.finishReason || r.finish_reason || "",
+    groups: numOrNull(r.groups),
+    dropped: numOrNull(r.droppedBlocks != null ? r.droppedBlocks : r.dropped_blocks),
+    expected,
+    actual,
+  };
+}
+function resultWarnLines(r) {
+  const info = truncationInfo(r);
+  if (!info) return [];
+  const lines = [];
+  if (info.truncated) {
+    lines.push(t("warn.truncatedTitle"));
+    lines.push(t("warn.truncatedBody", { finish: info.finish || "length" }));
+  }
+  if (info.mismatch) {
+    lines.push(info.expected != null && info.actual != null
+      ? t("warn.pagesMismatchBody", { expected: info.expected, actual: info.actual })
+      : t("warn.pagesMismatchUnknown"));
+  }
+  if (info.groups != null && info.groups > 1) lines.push(t("warn.groups", { n: info.groups }));
+  if (info.dropped != null && info.dropped > 0) lines.push(t("warn.droppedBlocks", { n: info.dropped }));
+  lines.push(t("warn.retryHint"));
+  return lines;
+}
+function batchWarnLines(result) {
+  const items = (result && result.items) || [];
+  const n = items.filter(it => it && (it.truncated || it.pagesMismatch)).length;
+  if (!n) return [];
+  return [t("warn.batchTruncated", { n }), t("warn.retryHint")];
+}
+function renderResultWarn(lines) {
+  const box = $("#result-warn");
+  const body = $("#result-warn-body");
+  const list = (lines || []).filter(Boolean);
+  if (!list.length) {
+    box.hidden = true;
+    body.innerHTML = "";
+    return;
+  }
+  box.hidden = false;
+  body.innerHTML = list.map((line, i) =>
+    `<div class="rw-line${i === 0 ? " rw-title" : ""}">${escapeHtml(line)}</div>`).join("");
+}
+function logResultWarnings(result) {
+  if (!result) return;
+  if (result.mode === "batch") {
+    const items = result.items || [];
+    const n = items.filter(it => it && (it.truncated || it.pagesMismatch)).length;
+    if (n) flash(t("warn.batchTruncated", { n }));
+    return;
+  }
+  const info = truncationInfo(result);
+  if (!info) return;
+  const bits = [];
+  if (info.truncated) bits.push(t("warn.logTruncated", { finish: info.finish || "length" }));
+  if (info.mismatch) {
+    bits.push(info.expected != null && info.actual != null
+      ? t("warn.logPagesMismatch", { expected: info.expected, actual: info.actual })
+      : t("warn.pagesMismatchUnknown"));
+  }
+  flash(bits.join(" · "));
 }
 
 /* ── 结果渲染（轻量 Markdown）──────────────────────────── */
@@ -546,6 +725,10 @@ function showResult(result) {
   $("#btn-save").disabled = false;
   $("#batch-list").hidden = true;
   $("#batch-list").innerHTML = "";
+  $("#batch-actions").hidden = true;
+  $("#batch-error").hidden = true;
+  $(".md-wrap").hidden = false;
+  renderResultWarn(resultWarnLines(result));
   showResultPages();
 }
 
@@ -569,6 +752,10 @@ function renderResultText() {
 }
 
 /* ── 批量模式：逐文件结果 ─────────────────────────────────── */
+function firstLine(s) {
+  const txt = String(s == null ? "" : s);
+  return txt.split(/\r?\n/)[0] || "";
+}
 function showBatchResult(result) {
   const items = result.items || [];
   $("#result").hidden = false;
@@ -577,19 +764,23 @@ function showBatchResult(result) {
   const box = $("#batch-list");
   box.hidden = false;
   box.innerHTML = items.map((it, i) => {
-    const cls = it.ok ? "ok" : (it.skipped ? "skip" : "fail");
-    const badge = it.ok ? `<span class="chip chip-ok">${escapeHtml(t("chip.ok"))}</span>`
+    const ok = !!it.ok;
+    const badge = ok ? `<span class="chip chip-ok">${escapeHtml(t("chip.ok"))}</span>`
       : it.skipped ? `<span class="chip chip-muted">${escapeHtml(t("chip.skipped"))}</span>`
       : `<span class="chip chip-live">${escapeHtml(t("chip.fail"))}</span>`;
-    const meta = it.ok
+    // E3：逐文件也标出截断/页数不符
+    const extra = (it.truncated ? `<span class="chip chip-warn">${escapeHtml(t("chip.truncated"))}</span>` : "")
+      + (it.pagesMismatch ? `<span class="chip chip-warn">${escapeHtml(t("chip.mismatch"))}</span>` : "");
+    // 失败原因不截断：列表里元信息只放首行（CSS 省略号收敛），点开看完整错误
+    const meta = ok
       ? escapeHtml(t("result.charsTime", { chars: it.chars, time: fmtTime(it.elapsed) }))
-      : (it.error ? escapeHtml(it.error.slice(0, 80)) : "—");
+      : escapeHtml(firstLine(it.error) || "—");
     return `
-      <button class="batch-item${i === state.viewIndex ? " on" : ""}" data-i="${i}"${it.ok ? "" : " disabled"}>
+      <button class="batch-item${i === state.viewIndex ? " on" : ""}" data-i="${i}" title="${escapeHtml(ok ? "" : (it.error || ""))}">
         <span class="bn" title="${escapeHtml(it.name)}">${escapeHtml(it.name)}</span>
-        ${badge}
+        ${badge}${extra}
         <span class="bm">${meta}</span>
-        <span class="bx">${it.ok ? escapeHtml(t("result.view")) : ""}</span>
+        <span class="bx">${escapeHtml(ok ? t("result.view") : t("result.viewError"))}</span>
       </button>`;
   }).join("");
   $("#result-meta").textContent = t("result.batchMeta", {
@@ -597,17 +788,48 @@ function showBatchResult(result) {
     total: items.length,
     time: fmtTime(result.elapsed),
   });
-  viewBatchItem(state.viewIndex);
+  // 失败项可重试；失败原因在下方详情区完整展示
+  $("#batch-actions").hidden = !items.some(it => it && !it.ok);
+  $("#batch-error").hidden = true;
+  $(".md-wrap").hidden = false;
+  renderResultWarn(batchWarnLines(result));
+  const okIdx = items.findIndex(it => it.ok);
+  state.viewIndex = okIdx >= 0 ? okIdx : 0;
+  if (items.length) viewBatchItem(state.viewIndex);
 }
 
+function showBatchError(it) {
+  const box = $("#batch-error");
+  box.hidden = false;
+  box.innerHTML = `<div class="be-title">${escapeHtml(t("msg.batchErrorTitle"))} — ${escapeHtml(it.name || "")}</div>`
+    + `<div class="be-body">${escapeHtml(it.error || t("chip.fail"))}</div>`;
+}
 function viewBatchItem(i) {
   const items = state.batchItems || [];
   const it = items[i];
-  if (!it || !it.ok) return;
+  if (!it) return;
   state.viewIndex = i;
-  state.lastResult = { text: it.text, pages: it.pages || [it.text], outPath: it.outPath, elapsed: it.elapsed };
-  state.curPage = 0;
   $$("#batch-list .batch-item").forEach(b => b.classList.toggle("on", +b.dataset.i === i));
+  if (!it.ok) {
+    // 失败项：展示完整错误，隐藏正文区（避免残留上一次结果）
+    $(".md-wrap").hidden = true;
+    $("#page-tabs").hidden = true;
+    // 没有可复制/保存的正文：禁用按钮，避免复制到上一次的结果
+    $("#btn-copy").disabled = true;
+    $("#btn-save").disabled = true;
+    showBatchError(it);
+    return;
+  }
+  $(".md-wrap").hidden = false;
+  $("#batch-error").hidden = true;
+  $("#btn-copy").disabled = false;
+  $("#btn-save").disabled = false;
+  state.lastResult = {
+    text: it.text, pages: it.pages || [it.text], outPath: it.outPath, elapsed: it.elapsed,
+    truncated: !!it.truncated, pagesMismatch: !!it.pagesMismatch,
+    finishReason: it.finishReason || it.finish_reason || "",
+  };
+  state.curPage = 0;
   showResultPages();
 }
 
@@ -655,6 +877,79 @@ $("#result-mode").addEventListener("click", e => {
   $$("#result-mode button").forEach(x => x.classList.toggle("on", x === b));
   renderResultText();
 });
+
+/* ── B8 批量失败项重试（S4）：只重跑失败的文件，成功后替换该项 ── */
+function findSourceForItem(name, usedFiles, usedPaths, sourceKind) {
+  // 只从本轮批量识别的来源里找：目录识别的失败项不该被同名上传文件顶替
+  if (sourceKind !== "paths") {
+    for (let i = 0; i < state.files.length; i++) {
+      if (!usedFiles.has(i) && state.files[i].name === name) {
+        usedFiles.add(i);
+        return { kind: "file", file: state.files[i] };
+      }
+    }
+  }
+  if (sourceKind !== "files") {
+    for (let i = 0; i < state.pathFiles.length; i++) {
+      if (!usedPaths.has(i) && state.pathFiles[i].name === name) {
+        usedPaths.add(i);
+        return { kind: "path", path: state.pathFiles[i].path };
+      }
+    }
+  }
+  return null;
+}
+async function retryFailedItems() {
+  if (state.running || !state.batchItems) return;
+  const failed = state.batchItems
+    .map((it, idx) => ({ it, idx }))
+    .filter(x => x.it && !x.it.ok);          // 失败的 + 取消跳过的都算
+  if (!failed.length) return;
+  const usedFiles = new Set(), usedPaths = new Set();
+  const files = [], paths = [], targets = [];
+  for (const x of failed) {
+    const src = findSourceForItem(x.it.name, usedFiles, usedPaths, state.batchSource);
+    if (!src) continue;
+    if (src.kind === "file") files.push(src.file); else paths.push(src.path);
+    targets.push(x.idx);
+  }
+  if (!targets.length) { flash(t("msg.retryNoSource")); return; }
+  state.running = true;
+  renderRunButtons();
+  $("#btn-retry-failed").disabled = true;
+  $("#progress").hidden = false;
+  setProgress(2, t("msg.retrying", { n: targets.length }));
+  try {
+    const result = await API.recognize({
+      files, paths, prompt: $("#prompt-box").value.trim(), mode: "batch",
+    });
+    const newItems = (result && result.items) || [];
+    let okN = 0;
+    targets.forEach((idx, k) => {
+      const ni = newItems[k];
+      if (!ni) return;
+      state.batchItems[idx] = ni;
+      if (ni.ok) okN++;
+    });
+    const agg = state.lastBatchResult || { items: state.batchItems };
+    agg.items = state.batchItems;
+    agg.done = state.batchItems.filter(i => i.ok).length;
+    agg.elapsed = (agg.elapsed || 0) + ((result && result.elapsed) || 0);
+    state.lastBatchResult = agg;
+    flash(t("msg.retryDone", { ok: okN, n: targets.length }));
+    showBatchResult(agg);
+    logResultWarnings(agg);
+  } catch (e) {
+    flash(t("msg.genericFailed", { err: e.message || e }));
+  } finally {
+    state.running = false;
+    renderRunButtons();
+    $("#btn-retry-failed").disabled = false;
+    setTimeout(() => { if (!state.running) $("#progress").hidden = true; }, 1500);
+    refreshHistory();
+  }
+}
+$("#btn-retry-failed").addEventListener("click", retryFailedItems);
 
 /* 复制 / 保存 */
 $("#btn-copy").addEventListener("click", async () => {
@@ -745,6 +1040,9 @@ $("#history-list").addEventListener("click", async e => {
   const r = await API.readHistory(item.dataset.name);
   if (r && r.ok) {
     // 历史文件没有「页/耗时」概念：elapsed=null，元信息显示字数 + 历史文件
+    // 同时清掉批量态，否则语言切换/重渲染会把旧批量列表又画回来
+    state.batchItems = null;
+    state.lastBatchResult = null;
     state.lastResult = { text: r.text, pages: [r.text], outPath: r.name, elapsed: null };
     state.curPage = 0;
     showResult(state.lastResult);
@@ -1018,8 +1316,35 @@ function setScaleSelect(v) {
   }
   sel.value = val;
 }
+/* ── 识别参数夹取（S1）：前端先夹到合法区间再提交，返回值回显到输入框 ──
+   maxPageTokens: 0 = 不限，有效 256..65536
+   maxMergedPages: 0 = 不限，有效 0..200 */
+const SETTINGS_LIMITS = {
+  maxPageTokens: { min: 256, max: 65536, def: 4096, allowZero: true },
+  maxMergedPages: { min: 0, max: 200, def: 20, allowZero: true },
+};
+function clampSettingValue(key, raw) {
+  const spec = SETTINGS_LIMITS[key] || { min: 0, max: Number.MAX_SAFE_INTEGER, def: 0, allowZero: true };
+  let v = parseInt(String(raw == null ? "" : raw).trim(), 10);
+  if (!Number.isFinite(v)) v = spec.def;
+  if (v < 0) v = spec.allowZero ? 0 : spec.min;
+  if (v > 0 && v < spec.min) v = spec.min;
+  if (v > spec.max) v = spec.max;
+  return v;
+}
+function setIntSetting(s, key, sel) {
+  const el = $(sel);
+  const spec = SETTINGS_LIMITS[key];
+  if (Object.prototype.hasOwnProperty.call(s, key) && s[key] != null) {
+    el.value = String(clampSettingValue(key, s[key]));
+  } else if (!el.value) {
+    // 后端尚未返回该键时保留用户输入，只有空值才补默认值
+    el.value = String(spec.def);
+  }
+}
 function fillSettings(s) {
-  if (!s) return;
+  // 后端校验失败时返回 {ok:false,error}：不能当成设置对象把界面清空
+  if (!s || s.ok === false) return;
   state.settings = s;
   $("#set-model-dir").value = s.modelDir || "";
   $("#set-mirror").value = s.mirror || "";
@@ -1029,6 +1354,12 @@ function fillSettings(s) {
   $$("#set-outfmt button").forEach(b => b.classList.toggle("on", b.dataset.v === (s.outFormat || "md")));
   renderLangOptions(s.languages);
   $("#set-lang").value = s.lang || "zh";
+  // S1 识别参数：键缺失（后端未落地）时保持现有输入，不弹回默认
+  setIntSetting(s, "maxPageTokens", "#set-max-tokens");
+  setIntSetting(s, "maxMergedPages", "#set-max-merged-pages");
+  const crop = typeof s.cropMode === "string" ? s.cropMode : "auto";
+  $$("#set-crop-mode button").forEach(b => b.classList.toggle("on", b.dataset.v === crop));
+  if (typeof s.dropHeaders === "boolean") $("#set-drop-headers").checked = s.dropHeaders;
   renderPythonSettings(s);
   applyTheme(s.theme || "light");
   applyScale(s.scale || 100);
@@ -1049,6 +1380,10 @@ async function flushSettings() {
   if (!Object.keys(patch).length) return;
   try {
     const s = await API.setSettings(patch);
+    if (!s || s.ok === false) {
+      flash((s && s.error) || t("msg.genericFailed", { err: "settings" }));
+      return;
+    }
     fillSettings(s);
     const st = await API.getStatus();
     applyStatus(st);
@@ -1078,6 +1413,27 @@ $("#set-theme").addEventListener("click", e => {
   if (b) pushSettings({ theme: b.dataset.v });
 });
 $("#set-lang").addEventListener("change", () => pushSettings({ lang: $("#set-lang").value }));
+
+/* S1 识别参数：数值先夹取再提交（输入框同步回显夹取结果） */
+function bindIntSetting(sel, key) {
+  $(sel).addEventListener("change", () => {
+    const el = $(sel);
+    const v = clampSettingValue(key, el.value);
+    el.value = String(v);
+    pushSettings({ [key]: v });
+  });
+}
+bindIntSetting("#set-max-tokens", "maxPageTokens");
+bindIntSetting("#set-max-merged-pages", "maxMergedPages");
+$("#set-crop-mode").addEventListener("click", e => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  $$("#set-crop-mode button").forEach(x => x.classList.toggle("on", x === b));
+  pushSettings({ cropMode: b.dataset.v });
+});
+$("#set-drop-headers").addEventListener("change", () => {
+  pushSettings({ dropHeaders: $("#set-drop-headers").checked });
+});
 
 /* ── 设置页：Python 解释器（issue #2）──────────────────── */
 const pyUI = {
