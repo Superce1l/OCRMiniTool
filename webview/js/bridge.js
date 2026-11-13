@@ -152,6 +152,15 @@
       }
       return { ok: false };
     },
+    // E8：把后端缓存的本轮识别版面块（blocks）导出为可搜索 PDF。
+    // 与前端编辑稿无关；失败按 apiPost 口径返回 {ok:false,error}。
+    async exportPdf() {
+      if (MODE === "web") {
+        try { return await apiPost("/api/export-pdf", {}); }
+        catch (e) { return { ok: false, error: String(e) }; }
+      }
+      return { ok: false, error: "mock" };
+    },
     async startDownload() {
       if (MODE === "web") return apiPost("/api/download", {});
       mockDownload(); return { ok: true };

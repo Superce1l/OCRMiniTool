@@ -55,7 +55,7 @@ python）。不要 `cd` 到别的目录再调用相对路径的 `cli.py`——�
 | `--recursive` | 目录输入时递归子目录 |
 | `--prompt "<指令>"` | 识别指令（留空 = 模型默认的文档解析） |
 | `--out <目录>` | 结果落盘目录，默认当前目录；不存在会自动创建 |
-| `--format md\|txt\|json` | 每份结果的落盘格式，缺省 `md` |
+| `--format md\|txt\|json\|pdf` | 每份结果的落盘格式，缺省 `md`；`pdf` = 可搜索 PDF（**只支持单个 PDF 输入**，见 §3.4） |
 | `--device auto\|cuda\|cpu` | 推理设备，默认 `auto`（有 NVIDIA 用 CUDA，否则 CPU） |
 | `--max-page-tokens N` | 单页输出 token 上限。**引擎支持时透传，否则告警忽略**（见 §5） |
 | `--max-merged-pages N` | 每次请求最多合并多少页。引擎支持时透传；否则 CLI 侧按 N 页分块 |
@@ -77,7 +77,7 @@ python）。不要 `cd` 到别的目录再调用相对路径的 `cli.py`——�
 
 ## 3. 输出契约
 
-### 3.1 落盘（`--format md|txt|json`）
+### 3.1 落盘（`--format md|txt|json|pdf`）
 
 文件名 = 输入文件名的 stem（非法字符净化、超长截断，同 GUI），后缀随格式；
 **同名不覆盖**：`a.md` 已存在时依次写 `a (1).md`、`a (2).md`。
@@ -85,6 +85,7 @@ python）。不要 `cd` 到别的目录再调用相对路径的 `cli.py`——�
 - `md`：与 GUI 的 Markdown 一致；多页时页间有 `<!-- page N -->` 分隔行
 - `txt`：复用后端 `_md_to_plain`（去标题井号/粗斜体/链接/代码围栏，表格单元格转 tab）
 - `json`：见下（每份结果一个 JSON 文件）
+- `pdf`：**可搜索 PDF**——在原 PDF 上叠不可见文本层（见 §3.4）
 
 ### 3.2 `--json` 的 stdout
 
@@ -186,6 +187,34 @@ GUI 的 `.json` 文件结构（`outFormat = json`，写入 `outputs/<名字>.jso
 进度（加载模型、当前文件）、告警、错误一律走 **stderr**；`--json` 时 stdout
 保持干净。`--quiet` 只抑制进度与成功行，不抑制错误。
 
+### 3.4 可搜索 PDF（`--format pdf`）
+
+```bash
+python cli.py --input report.pdf --format pdf --out ./out
+# → ./out/report.pdf（原始版面 + 不可见文本层，可搜索/可复制）
+```
+
+- **前提**：单个 PDF 输入 + 引擎返回 `blocks`（E2 版面块）+ 本机有 pymupdf。
+  GUI 侧对应「导出可搜索 PDF」按钮（`POST /api/export-pdf`），判断条件相同。
+- **不满足时**：输入不是单个 PDF → 退出码 **1**（参数错误）；缺 `blocks`
+  或本机没有 pymupdf → 退出码 **2**（环境/引擎能力）。
+- **做法**：用 PyMuPDF 打开**原始 PDF**（页数与页面内容原样保留），按每个块的
+  `bbox` 在对应页叠加**不可见文本**（`insert_textbox(render_mode=3)`，放不下的
+  块退回 `insert_text`，仍然不可见）。因此肉眼看仍是原扫描件，但可以被
+  Ctrl+F / 复制 / 全文检索 / OCR 后处理工具抽取。
+- **dpi 口径**：`bbox` 来自模型输入图像（引擎 `pdf_to_images` 默认 **200 dpi**），
+  写入时按 `×72/200` 像素→pt 换算并 clamp 到页面范围内。若以后改 dpi，
+  两侧必须同步（CLI 用 `PDF_DPI`，后端缓存里记 `dpi=200`）。
+- **中文**：文本层用 PyMuPDF 内置 CJK 字体 `china-s`，不需要外挂字体文件，
+  中英文混排都能抽出。
+- **页范围**：`--pages` 与 `--format pdf` 可合用——文本层会按页范围映射回
+  **原 PDF 的对应页**（例如 `--pages "3-5"` 时第 1 个识别页的文本写在原 PDF
+  第 3 页）。
+- **与 GUI 的差异**：GUI 导出到设置里的「输出目录」（`outputDir`，空=程序目录
+  outputs），文件名取识别结果名并**同名递增**；CLI 导出到 `--out` 目录、
+  文件名取输入 PDF 的 stem（同样同名递增），且写文件是原子的
+  （`<name>.pdf.tmp.pdf` → `os.replace`，崩溃不留半截文件）。
+
 ---
 
 ## 4. 退出码
@@ -193,8 +222,8 @@ GUI 的 `.json` 文件结构（`outFormat = json`，写入 `outputs/<名字>.jso
 | 码 | 含义 | 典型原因 |
 |---|---|---|
 | **0** | 全部成功 | 正常结束 |
-| **1** | 参数错误 | 缺 `--input`、路径不存在、扩展名不支持、`--pages` 语法错、`--out` 不可写、未知参数 |
-| **2** | 环境 / 模型错误 | 模型文件不完整、未装 torch 推理组件、CUDA 组件不匹配、模型加载失败、PDF 输入缺 pymupdf |
+| **1** | 参数错误 | 缺 `--input`、路径不存在、扩展名不支持、`--pages` 语法错、`--out` 不可写、未知参数、`--format pdf` 但输入不是单个 PDF |
+| **2** | 环境 / 模型错误 | 模型文件不完整、未装 torch 推理组件、CUDA 组件不匹配、模型加载失败、PDF 输入缺 pymupdf、`--format pdf` 但引擎没给 blocks |
 | **3** | 有文件失败 | 单个文件识别异常（其余文件继续），**全部失败也返回 3** |
 | **130** | 被中断 | 运行时 Ctrl+C（`engine.cancel_event` 会置位） |
 

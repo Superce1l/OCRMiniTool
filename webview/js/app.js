@@ -1031,6 +1031,7 @@ function viewBatchItem(i) {
     $("#btn-save").disabled = true;
     $("#result-edited").hidden = true;   // B9：失败项没有可编辑正文
     showFindBar(false);                  // E17：无正文可查找
+    updatePdfButton(true);               // E8：失败项没有可导出的识别结果
     showBatchError(it);
     return;
   }
@@ -1044,6 +1045,8 @@ function viewBatchItem(i) {
     finishReason: it.finishReason || it.finish_reason || "",
     edited: !!it.edited,
     blocks: it.blocks,                  // E2：JSON 导出需要当前条目的结构化块
+    pdfAvailable: !!it.pdfAvailable,    // E8：批量条目若来自单个 PDF 才允许导出可搜索 PDF
+    pdfSource: it.pdfSource || "",
   };
   state.curPage = 0;
   showResultPages();
@@ -1069,6 +1072,7 @@ function showResultPages() {
   }
   updateResultMeta();
   renderResultText();
+  updatePdfButton();   // E8：切页/换结果后按 pdfAvailable 重算导出按钮
 }
 
 $("#batch-list").addEventListener("click", e => {
@@ -1419,6 +1423,33 @@ function downloadBlob(blob, filename) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
+
+/* ── E8 可搜索 PDF：只导出后端缓存的本轮识别版面块（blocks）────────
+   与前端编辑稿无关（按钮 title 已注明），后端负责生成 PDF。
+   可见性随结果切换重算：showResultPages / 批量项切换 / 重试后都调用
+   updatePdfButton()；批量失败项强制隐藏。 */
+function updatePdfButton(forceHide) {
+  const btn = $("#btn-export-pdf");
+  if (!btn) return;
+  const r = state.lastResult;
+  btn.hidden = !!forceHide || !(r && r.pdfAvailable === true);
+}
+$("#btn-export-pdf").addEventListener("click", async () => {
+  const btn = $("#btn-export-pdf");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  flash(t("msg.pdfExporting"));
+  try {
+    const r = await API.exportPdf();
+    if (r && r.ok) flash(t("msg.pdfExported", { path: r.path || "" }));
+    else flashError((r && r.error) || t("err.pdfUnavailable"));
+  } catch (e) {
+    flashError((e && e.message) ? e.message : t("err.pdfUnavailable"));
+  } finally {
+    updatePdfButton();     // finally 按可见性再算一次，然后恢复可点
+    btn.disabled = false;
+  }
+});
 
 $("#btn-save").addEventListener("click", () => {
   const r = state.lastResult;

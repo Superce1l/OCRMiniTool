@@ -437,14 +437,28 @@ tag 与 `downloader._TORCH_TAG` 一致（`runtime-torch<torch 版本>`），资�
 
 | 资产 | 说明 |
 |---|---|
-| `ocrmini-runtime-torch<v>-cpu.zip` | CPU 组件整包 |
-| `ocrmini-runtime-torch<v>-cu128.zip.part01-of-2` / `.part02-of-2` | cu128 超过 GitHub 单资产 2 GB，按 **1900 MiB** 切成两卷；两端拼接即整包 |
+| `ocrmini-runtime-torch<v>-cpu.zip` | CPU 组件整包（默认不分卷） |
+| `ocrmini-runtime-torch<v>-cu128.zip.part01-of-N` … `partNN-of-N` | cu128 超过 GitHub 单资产 2 GB，**默认按 1900 MiB 分卷**（`--split`）；命名 `{zip}.part{i:02d}-of-{N}`，**N 不补零**，与 downloader 拼接的 URL 完全一致 |
 | `<zip>.sha256` | **整包**哈希，`sha256sum` 格式 `<hex>  <文件名>`（应用取第一个 64 位 hex） |
-| `SHA256SUMS` | 所有 zip + `manifest.json` 的哈希清单（人肉核对/发布说明用） |
-| `manifest.json` | `build_components.py` 产出；顶层按 zip 名索引，含 `flavor/torch/torchvision/size/sha256` |
+| `SHA256SUMS` | 所有 zip 行 + 各分卷行 + `manifest.json` 行的 sha256 清单（人肉核对/发布说明用） |
+| `manifest.json` | `build_components.py` 产出；顶层按 zip 名索引：`{flavor,torch,torchvision,size,size_mb,sha256,tops,parts:[{name,size,sha256}]}`；downloader 读取兼容（只取 `sha256`，也兼容 `{"zips":{…}}`） |
 
-`build_components.py` 现在会自动产出后三个文件（`write_sidecars`），打印上传指引；
-`build_components.py --help` 也写明这套清单。
+`build_components.py` 会自动产出后三个文件（`write_sidecars`），打印上传指引：
+
+```bat
+uv run python build_components.py                 rem 两个都做；cu128 默认切成 1900 MiB 两卷
+uv run python build_components.py cu128 --split 1900
+uv run python build_components.py cpu --split 0   rem 不切
+uv run python build_components.py --no-deps --pins "sympy==1.14.0,networkx==3.7,jinja2==3.1.6"
+```
+
+- **切完保留原 zip**：sidecar/整包 sha256 都以原 zip 为准；**发布时 split flavor 只传 parts**，
+  原 zip 留本地。
+- **版本单一来源**：`TORCH_VER/TV_VER` 必须等于 `downloader._TORCH_VERSION/_TORCHVISION_VERSION`，
+  main 启动先校验（`version_mismatch()`），不一致直接拒绝构建。
+- **`--no-deps`/`--pins` 风险**：`--pins` 就是完整的依赖集（torch/torchvision 之外还要
+  `sympy/networkx/jinja2/filelock/fsspec/mpmath/setuptools…`），漏一个就是组件缺件
+  （历史实录：缺 sympy → `import torch` 失败）。默认不带 `--no-deps`，由 uv 正常解析。
 
 ### 8.2 应用侧期望哈希的来源（优先级从高到低）
 
@@ -471,6 +485,18 @@ tag 与 `downloader._TORCH_TAG` 一致（`runtime-torch<torch 版本>`），资�
 校验只读**拼接后的 final zip**（与发布整包一致），不动每卷 `<part>.part` 暂存/HEAD 核对/改名
 逻辑；分卷先拼接、后校验、再解压。因此 D6 的续传修复与本校验互不影响
 （`tests/test_build_downloader_parts.py` 的 12+ 用例保持全绿）。
+
+**构建侧（D7）与下载侧的衔接**：
+
+- `build_components.split_file()` 命名 `{zip}.part{i:02d}-of-{N}`，**N 不补零**——与
+  `downloader.download_torch()` 的 `f"{meta['zip']}.part{i:02d}-of-{n_parts}"` 完全一致，
+  否则应用拼出的下载 URL 会 404。
+- `downloader._TORCH_FLAVORS[flavor]["parts"]` 必须等于构建产出的分卷数：当前 cu128
+  整包约 3.34 GB、`--split 1900` → **2 卷**；如果换 torch 版本导致体积跨过 1900×N 边界，
+  两边要同时改（`version_mismatch()` 只校验版本号，不校验卷数）。
+- 构建侧 manifest 里的 `parts[{name,size,sha256}]` 目前供人工核对/发布说明使用；
+  downloader 的分卷校验仍靠 HEAD 字节数（D6），整包 sha256 在拼接后校验（D5）。
+  将来若要把逐卷 sha256 下发给应用，可直接读这个 `parts` 字段（结构已就绪）。
 
 ### 8.5 已发布资产的哈希（可回填）
 

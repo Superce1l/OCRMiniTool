@@ -350,6 +350,169 @@ def decode_child_text(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def _import_fitz():
+    """取 PyMuPDF 模块（新名 `pymupdf` 优先，老名 `fitz` 兼容）。
+
+    缺失时抛 ImportError（调用方转成 err.noPymupdf 文案）。新名优先是为了
+    避开 `import fitz` 在 PyMuPDF>=1.24 上的 FutureWarning。
+    """
+    try:
+        import pymupdf  # type: ignore
+        return pymupdf
+    except ImportError:
+        pass
+    import fitz  # type: ignore  # 旧版本只有这个名字
+    return fitz
+
+
+def _clean_pdf_text(text) -> str:
+    """块文本 → 单行纯文本（去 Markdown/HTML 标记、压缩空白）。
+
+    复用后端的 _md_to_plain（与 GUI 的 txt 导出同一套规则）；任何异常退化为
+    最小正则清洗，绝不让一个坏块把整份导出搞挂。
+    """
+    raw = str(text or "")
+    try:
+        plain = WebBackend._md_to_plain(raw)
+    except Exception:
+        plain = re.sub(r"<[^>\n]{1,120}>", "", raw)
+    return re.sub(r"\s+", " ", plain).strip()
+
+
+def _clampf(value: float, lo: float, hi: float) -> float:
+    return lo if value < lo else (hi if value > hi else value)
+
+
+def build_searchable_pdf(src_pdf, blocks, out_path, *, dpi: float = 200,
+                         page_range: str = "") -> Path:
+    """在原始 PDF 上叠加**不可见文本层**，生成可搜索/可复制的 PDF（E8）。
+
+    src_pdf: 原 PDF 路径（页序/页面内容原样保留，只加文本层）。
+    blocks:  E2 页信封 `[{page, blocks:[{bbox, text, ...}]}]`；page 是**本次
+             识别的相对页序**（1 起），bbox 是模型输入图像的像素坐标。
+    out_path: 输出路径；先写 `<out>.tmp.pdf` 再 os.replace（原子）。
+    dpi:     blocks 的 bbox 对应的光栅化 dpi（引擎 pdf_to_images 默认 200）；
+             像素 → pt 用 ×72/dpi。
+    page_range: 识别时用的 PDF 页范围（相对页 → 原页的映射）；空 = 不筛选。
+
+    返回实际写入的 out_path。fitz 缺失抛 ImportError；blocks 为空/无可用文本
+    抛 ValueError（不产出空文件）。渲染方式：`insert_textbox(render_mode=3)`；
+    放不下（返回负值）退回 `insert_text` 于块左上角——两者都不可见，只进
+    文本层，中文用内置 CJK 字体 `china-s`（无需外挂字体）。
+    """
+    fitz = _import_fitz()
+    src = Path(src_pdf)
+    out = Path(out_path)
+    # 安全闸：绝不覆盖源 PDF（导出目录=源目录且同名时会撞上；上层通常用
+    # 「同名递增」避开，但构建器自己也必须挡住，否则原扫描件就被毁掉）
+    try:
+        same = os.path.normcase(os.path.abspath(str(src))) == \
+            os.path.normcase(os.path.abspath(str(out)))
+    except (OSError, ValueError):
+        same = False
+    if same:
+        raise ValueError("输出路径不能与源 PDF 相同")
+    try:
+        dpi_v = float(dpi)
+    except (TypeError, ValueError):
+        dpi_v = 200.0
+    if dpi_v <= 0:
+        dpi_v = 200.0
+
+    # 页信封 → {相对页号: [块, ...]}；缺 page 时按出现顺序兜底
+    by_page: dict[int, list] = {}
+    for idx, env in enumerate(blocks or [], 1):
+        if not isinstance(env, dict):
+            continue
+        try:
+            page_no = int(env.get("page") or idx)
+        except (TypeError, ValueError):
+            page_no = idx
+        chunk = env.get("blocks")
+        if isinstance(chunk, list) and chunk:
+            by_page.setdefault(page_no, []).extend(
+                b for b in chunk if isinstance(b, dict))
+
+    # 先判「有没有值得写的东西」：空 blocks / 只有无坐标块 → 拒绝（不产出
+    # 看着成功却没有文本层的空文件）；页越界只在写入阶段跳过，不算失败。
+    candidates = 0
+    for chunk in by_page.values():
+        for blk in chunk:
+            bbox = blk.get("bbox")
+            if (isinstance(bbox, (list, tuple)) and len(bbox) == 4
+                    and _clean_pdf_text(blk.get("text"))):
+                candidates += 1
+    if candidates == 0:
+        raise ValueError("blocks 里没有可写入的文本/bbox")
+
+    doc = fitz.open(str(src))
+    written = 0
+    try:
+        total = int(getattr(doc, "page_count", 0) or 0)
+        spec = str(page_range or "").strip()
+        if spec:
+            try:
+                selected = _parse_page_spec(spec, total)
+            except ValueError as e:
+                raise ValueError(f"bad page range: {spec!r}") from e
+        else:
+            selected = list(range(1, total + 1))
+
+        for rel_page, page_blocks in by_page.items():
+            if spec:
+                if rel_page < 1 or rel_page > len(selected):
+                    continue                       # 相对页越界 → 跳过
+                page_index = selected[rel_page - 1] - 1
+            else:
+                page_index = rel_page - 1
+            if page_index < 0 or page_index >= total:
+                continue
+            page = doc[page_index]
+            rect = page.rect
+            for blk in page_blocks:
+                text = _clean_pdf_text(blk.get("text"))
+                bbox = blk.get("bbox")
+                if not text or not isinstance(bbox, (list, tuple)) \
+                        or len(bbox) != 4:
+                    continue
+                try:
+                    x0, y0, x1, y1 = (float(v) for v in bbox)
+                except (TypeError, ValueError):
+                    continue
+                scale = 72.0 / dpi_v
+                x0 = _clampf(x0 * scale, rect.x0, rect.x1)
+                y0 = _clampf(y0 * scale, rect.y0, rect.y1)
+                x1 = _clampf(x1 * scale, rect.x0, rect.x1)
+                y1 = _clampf(y1 * scale, rect.y0, rect.y1)
+                if x1 - x0 < 1.0 or y1 - y0 < 1.0:
+                    continue
+                target = fitz.Rect(x0, y0, x1, y1)
+                fontsize = _clampf((y1 - y0) * 0.8, 4.0, 12.0)
+                rc = page.insert_textbox(
+                    target, text, fontsize=fontsize, fontname="china-s",
+                    render_mode=3, align=0)
+                if rc < 0:
+                    # 放不下（字号/行距超框）：退到左上角单行，仍然不可见
+                    page.insert_text((x0, min(y1, y0 + fontsize)), text,
+                                     fontsize=fontsize, fontname="china-s",
+                                     render_mode=3)
+                written += 1
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_name(out.name + ".tmp.pdf")
+        try:
+            doc.save(str(tmp), garbage=3, deflate=True)
+            os.replace(tmp, out)
+        except BaseException:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+    finally:
+        doc.close()
+    return out
+
+
 def reexec_if_custom_python():
     """settings.json 配了 pythonPath 且 ≠ 当前解释器 → 重挂过去（源码运行）。
 
@@ -423,6 +586,9 @@ class WebBackend:
         # 硬件推荐短缓存：一次 GET /api/env 会在 env_status 与 _torch_flavor
         # 各取一次，缓存 60s 避免重复跑显卡枚举（PowerShell，~0.5s）
         self._rec_cache = (0.0, None)
+        # E8：最近一次「可导出可搜索 PDF」的识别上下文
+        # {path, dpi, blocks, page_range, name}；不满足条件时置 None（按钮随消失）
+        self._last_pdf = None
 
     # ── 事件与设置 ───────────────────────────────────────────
     def _emit(self, event: str, payload: dict):
@@ -942,6 +1108,9 @@ class WebBackend:
             self.recognizing = True
             self._task_label = tr("task.ocr")
         self.cancel_event.clear()
+        # E8：新一轮识别开始 → 先作废旧的可搜索 PDF 上下文（成功后再重建，
+        # 这样批量/非 PDF/无 blocks 的结果不会让「导出」按钮指向旧文件）
+        self._last_pdf = None
         mode = "batch" if opts.get("mode") == "batch" else "merged"
 
         try:
@@ -1020,6 +1189,19 @@ class WebBackend:
                     payload["expectedPages"] = inf["expectedPages"]
                 if inf.get("numPagesOut") is not None:
                     payload["actualPages"] = inf["numPagesOut"]
+            # E8：merged + 恰好一个 PDF 输入 + 有 blocks → 记住可导出上下文，
+            # 并告诉前端「可导出可搜索 PDF」。其它情形保持不可用（上面已清空）。
+            if (len(paths) == 1 and paths[0].suffix.lower() == ".pdf"
+                    and result.get("blocks")):
+                self._last_pdf = {
+                    "path": str(paths[0]),
+                    "dpi": 200,                      # 与 pdf_to_images 默认一致
+                    "blocks": result.get("blocks"),
+                    "page_range": self._page_range_setting(),
+                    "name": name,
+                }
+                payload["pdfAvailable"] = True
+                payload["pdfSource"] = paths[0].name
             return payload
         except EngineError as e:
             if self.cancel_event.is_set():
@@ -1635,6 +1817,41 @@ class WebBackend:
             return True
         except Exception:
             return False
+
+    # ── E8：可搜索 PDF 导出 ──────────────────────────────────
+    def export_searchable_pdf(self) -> dict:
+        """把最近一次识别的 PDF 结果导出为「原文+不可见文本层」的可搜索 PDF。
+
+        返回 {"ok": True, "path": ...} 或 {"ok": False, "error": ...}。
+        只有 merged 模式、单个 PDF 输入、引擎给了 blocks 时才可用（见
+        `self._last_pdf`）；输出目录跟随 E19 的 self.output_dir()，同名递增。
+        """
+        ctx = self._last_pdf
+        if not ctx or not ctx.get("blocks"):
+            return {"ok": False, "error": tr("err.pdfUnavailable")}
+        try:
+            _import_fitz()
+        except ImportError:
+            return {"ok": False, "error": tr("err.noPymupdf")}
+        name = self._sanitize_name(ctx.get("name") or
+                                   Path(str(ctx.get("path") or "")).stem or
+                                   "result")
+        try:
+            out_dir = self.output_dir()
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out = out_dir / f"{name}.pdf"
+            i = 1
+            while out.exists():
+                out = out_dir / f"{name} ({i}).pdf"
+                i += 1
+            build_searchable_pdf(
+                ctx["path"], ctx["blocks"], out,
+                dpi=int(ctx.get("dpi") or 200),
+                page_range=str(ctx.get("page_range") or ""))
+        except Exception as e:
+            log_error("导出可搜索 PDF 失败", exc=e)
+            return {"ok": False, "error": str(e)[:300]}
+        return {"ok": True, "path": str(out)}
 
     def browse_folder(self, start: str = "", title: str = "") -> dict:
         try:

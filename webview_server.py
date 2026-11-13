@@ -20,6 +20,7 @@ Host/Origin 校验挡 DNS rebinding / 跨站 POST。
   POST /api/recognize       → multipart 多文件上传识别，或 JSON {"paths":[…]}
                               直读本机路径（不复制文件），回 {text,pages,outPath}
   POST /api/scan-dir        → 列目录下的可识别文件（只回路径，不回传内容）
+  POST /api/export-pdf      → 把最近一次 PDF 识别结果导出为可搜索 PDF（E8）
   POST /api/cancel          → 请求取消当前任务
   POST /api/history-read    → 读取一条历史结果的文本
   POST /api/history-delete  → 删除一条历史结果（移入回收站）
@@ -556,6 +557,11 @@ class WebViewServer:
                             recursive=bool(body.get("recursive", True)),
                             max_files=body.get("maxFiles", 500),
                             max_depth=body.get("maxDepth", 8)))
+                    if path == "/api/export-pdf":
+                        # E8：把最近一次 PDF 识别的结果导出为可搜索 PDF
+                        # （无 body 或 {} 均可；可用性由后端 self._last_pdf 决定）
+                        self._read_json_body()
+                        return self._json(server.backend.export_searchable_pdf())
                     if path == "/api/open-output":
                         return self._json({"ok": server.backend.open_output_dir()})
                     if path == "/api/shutdown":

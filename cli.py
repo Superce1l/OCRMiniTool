@@ -91,6 +91,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "err.notReady": "模型未就绪（engine.ready 为 False）",
         "err.recognizeFailed": "识别失败：{name}：{err}",
         "err.fileUnreadable": "文件不可读：{path}",
+        "err.pdfNeedsPdfInput": "可搜索 PDF 只支持「单个 PDF 输入」（--format pdf）",
+        "err.pdfNoBlocks": "引擎没有返回版面 blocks，无法生成可搜索 PDF",
+        "err.pdfExportFailed": "生成可搜索 PDF 失败：{err}",
+        "info.pdfOk": "  ✓ {name} → 可搜索 PDF：{path}",
         "warn.pagesIgnored": "--pages 只对 PDF 生效，已忽略：{name}",
         "warn.noPageTokens": "当前引擎不支持 --max-page-tokens，已忽略",
         "warn.noDropHeaders": "当前引擎不支持 --drop-headers，已忽略",
@@ -133,6 +137,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "err.notReady": "model not ready (engine.ready is False)",
         "err.recognizeFailed": "recognition failed: {name}: {err}",
         "err.fileUnreadable": "file unreadable: {path}",
+        "err.pdfNeedsPdfInput": "searchable PDF requires a single PDF input (--format pdf)",
+        "err.pdfNoBlocks": "engine returned no layout blocks; cannot build a searchable PDF",
+        "err.pdfExportFailed": "searchable PDF export failed: {err}",
+        "info.pdfOk": "  ✓ {name} → searchable PDF: {path}",
         "warn.pagesIgnored": "--pages only applies to PDF, ignored: {name}",
         "warn.noPageTokens": "current engine has no --max-page-tokens; ignored",
         "warn.noDropHeaders": "current engine has no --drop-headers; ignored",
@@ -258,8 +266,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--recursive", action="store_true", help="--input 是目录时递归子目录")
     ap.add_argument("--prompt", default="", help="识别指令（留空 = 模型默认文档解析）")
     ap.add_argument("--out", default=None, help="输出目录（默认当前目录）")
-    ap.add_argument("--format", choices=("md", "txt", "json"), default=None,
-                    help="每份结果的落盘格式（默认 md；与 --json 一起用见文档）")
+    ap.add_argument("--format", choices=("md", "txt", "json", "pdf"), default=None,
+                    help="每份结果的落盘格式（默认 md；pdf=可搜索 PDF，需单个 PDF 输入）")
     ap.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto",
                     help="推理设备（默认 auto）")
     ap.add_argument("--max-page-tokens", type=int, default=None,
@@ -613,6 +621,14 @@ def _unique_path(target: Path) -> Path:
         i += 1
 
 
+def _build_searchable_pdf(source: Path, blocks: list, target: Path,
+                         page_range: str = "") -> Path:
+    """E8：调用后端的可搜索 PDF 构建器（懒导入，避免 CLI 导入期拉 webview_backend）。"""
+    from webview_backend import build_searchable_pdf
+    return build_searchable_pdf(source, blocks, target,
+                                dpi=PDF_DPI, page_range=page_range)
+
+
 def _write_output(out_dir: Path, source: Path, fmt: str, result: dict) -> Path:
     """每份结果落盘（--out 目录；md/txt/json 三选一）。返回实际路径。"""
     stem = _sanitize_stem(source.stem)
@@ -792,6 +808,16 @@ def main(argv: list[str] | None = None, engine_factory=None) -> int:
         fmt = "md"
         write_files = not args.json
     out_dir = Path(args.out).expanduser() if args.out else Path.cwd()
+    if fmt == "pdf":
+        # E8：可搜索 PDF 需要「原始 PDF + blocks」→ 只支持单个 PDF 输入；
+        # 非 PDF → 参数错误(1)；缺 pymupdf → 环境错误(2)；缺 blocks 在识别后判(2)。
+        if len(files) != 1 or files[0].suffix.lower() != ".pdf":
+            _err(_msg(lang, "err.pdfNeedsPdfInput"))
+            return EXIT_PARAM
+        if _find_spec("fitz") is None and _find_spec("pymupdf") is None \
+                and _pkg_version("pymupdf") is None:
+            _err(_msg(lang, "err.pymupdfMissing"))
+            return EXIT_ENV
     if write_files:
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -860,13 +886,38 @@ def main(argv: list[str] | None = None, engine_factory=None) -> int:
                                want=res.get("expectedPages") or "?"),
                           quiet=args.quiet)
                 if write_files:
-                    res["outPath"] = str(_write_output(out_dir, path, fmt, res))
+                    if fmt == "pdf":
+                        # E8：原 PDF 上叠不可见文本层（页范围映射用 --pages）
+                        blocks = res.get("blocks")
+                        if not blocks:
+                            _err(_msg(lang, "err.pdfNoBlocks"))
+                            return EXIT_ENV
+                        target = _unique_path(
+                            out_dir / f"{_sanitize_stem(path.stem)}.pdf")
+                        try:
+                            _build_searchable_pdf(
+                                path, blocks, target,
+                                page_range=args.pages or "")
+                        except Exception as e:
+                            _err(_msg(lang, "err.pdfExportFailed", err=e))
+                            if args.verbose:
+                                traceback.print_exc(file=sys.stderr)
+                            return EXIT_ENV
+                        res["outPath"] = str(target)
+                    else:
+                        res["outPath"] = str(
+                            _write_output(out_dir, path, fmt, res))
                 results.append(res)
                 if not args.json:
-                    key = "info.fileOk" if res.get("outPath") else "info.fileOkNoOut"
-                    _out(_msg(lang, key, name=path.name,
-                              pages=len(res.get("pages") or []),
-                              secs=float(res.get("elapsed") or 0.0)))
+                    if fmt == "pdf":
+                        _out(_msg(lang, "info.pdfOk", name=path.name,
+                                  path=res.get("outPath")))
+                    else:
+                        key = ("info.fileOk" if res.get("outPath")
+                               else "info.fileOkNoOut")
+                        _out(_msg(lang, key, name=path.name,
+                                  pages=len(res.get("pages") or []),
+                                  secs=float(res.get("elapsed") or 0.0)))
             except KeyboardInterrupt:
                 raise
             except Exception as e:
