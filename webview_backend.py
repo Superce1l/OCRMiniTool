@@ -13,6 +13,7 @@ on_event 回调（webview_server 转成 SSE）推给前端：
 """
 from __future__ import annotations
 
+import base64
 import json
 import inspect
 import locale
@@ -25,7 +26,8 @@ import threading
 import time
 from pathlib import Path
 
-from applog import log_download, log_error, log_info, log_model, log_ocr
+from applog import (log_download, log_error, log_info, log_model, log_ocr,
+                    log_warn)
 from downloader import (CancelledError, _TORCH_VERSION, download_model,
                         installed_torch_info, quick_check, quick_check_torch,
                         set_mirror)
@@ -78,9 +80,21 @@ MAX_SCAN_DEPTH = 64          # 目录深度硬上限
 MAX_RECOGNIZE_PATHS = 200    # 一次识别允许的路径数上限（与上传链路同量级）
 
 _CROP_MODES = ("auto", "gundam", "base")
-_OUT_FORMATS = ("md", "txt", "json")     # 识别结果落盘格式（E2）
+_OUT_FORMATS = ("md", "txt", "json", "docx", "xlsx")   # 落盘格式（E2/E9/E10）
+_OFFICE_FORMATS = ("docx", "xlsx")                    # 由 office_export 生成的两种
 _ENGINE_GROUP_KWARGS = ("max_page_tokens", "max_merged_pages", "drop_headers",
                         "page_range", "join_lines", "cjk_spacing")
+
+
+def _office_export():
+    """懒加载 office_export（E9/E10 的 docx/xlsx 生成器）。
+
+    该模块由另一路同事并行实现，签名固定：docx_bytes/xlsx_bytes（无表格 →
+    ValueError("no tables")）。缺模块时抛 ImportError，调用方按「降级写 md」
+    处理——识别本身绝不能因为导出器缺失而失败。
+    """
+    import office_export
+    return office_export
 
 # ── A9：识别请求护栏（页数 / 单文件体积）──────────────────────────
 # 100+ 页 PDF 一次请求会同时驻留 GB 级 PIL 与临时 PNG（A8 未做），最坏生成
@@ -589,6 +603,9 @@ class WebBackend:
         # E8：最近一次「可导出可搜索 PDF」的识别上下文
         # {path, dpi, blocks, page_range, name}；不满足条件时置 None（按钮随消失）
         self._last_pdf = None
+        # E9/E10：最近一次 merged 结果的结构化 blocks（供 /api/export-office
+        # 在响应里直接返回 docx/xlsx 字节，不写盘）；无 blocks 时不缓存
+        self._last_result = None
 
     # ── 事件与设置 ───────────────────────────────────────────
     def _emit(self, event: str, payload: dict):
@@ -1111,6 +1128,8 @@ class WebBackend:
         # E8：新一轮识别开始 → 先作废旧的可搜索 PDF 上下文（成功后再重建，
         # 这样批量/非 PDF/无 blocks 的结果不会让「导出」按钮指向旧文件）
         self._last_pdf = None
+        # E9/E10：同理作废旧的结构化结果缓存（merged 成功且有 blocks 才重建）
+        self._last_result = None
         mode = "batch" if opts.get("mode") == "batch" else "merged"
 
         try:
@@ -1171,6 +1190,9 @@ class WebBackend:
                 "text": result.get("text", ""),
                 "pages": result.get("pages", []),
                 "outPath": str(out_path),
+                # E9/E10：实际落盘格式（docx/xlsx 失败会降级成 md，前端/日志
+                # 以这个字段为准，而不是用户设置的期望格式）
+                "savedFormat": out_path.suffix.lower().lstrip("."),
                 "elapsed": elapsed,
                 "cancelled": False,
             }
@@ -1202,6 +1224,11 @@ class WebBackend:
                 }
                 payload["pdfAvailable"] = True
                 payload["pdfSource"] = paths[0].name
+            # E9/E10：缓存最近一次 merged 的结构化结果（供 /api/export-office
+            # 在响应里返回 docx/xlsx 字节）；无 blocks 不缓存（上面已清空）。
+            if result.get("blocks"):
+                self._last_result = {"blocks": result.get("blocks"),
+                                     "name": name}
             return payload
         except EngineError as e:
             if self.cancel_event.is_set():
@@ -1301,6 +1328,7 @@ class WebBackend:
                             "text": result.get("text", ""),
                             "pages": result.get("pages", []),
                             "outPath": str(out_path),
+                            "savedFormat": out_path.suffix.lower().lstrip("."),
                             "elapsed": result.get("elapsed", 0),
                             "chars": chars}
                     # 批量条目也带截断/页数不符/表格告警/版面块（缺省自然不带）
@@ -1436,8 +1464,54 @@ class WebBackend:
                    for i in range(max(0, int(page_count or 0)))]
         return out
 
+    def _save_office(self, name: str, result: dict, fmt: str) -> Path | None:
+        """E9/E10：用 office_export 从 result["blocks"] 生成 docx/xlsx 并原子落盘。
+
+        返回写入路径；**任何失败都返回 None**（由调用方降级写 md）：
+          • 结果没有 blocks（旧引擎/非结构化）；
+          • office_export 未落地（ImportError）；
+          • xlsx 没有可导出表格（ValueError("no tables")）；
+          • 生成/写盘异常。
+        理由：识别已经成功，导出失败不该让整次识别失败（用户仍应拿到 md）。
+        """
+        blocks = result.get("blocks") if isinstance(result, dict) else None
+        if not blocks:
+            log_warn(f"导出 {fmt} 失败：结果没有 blocks，已降级为 Markdown")
+            return None
+        try:
+            mod = _office_export()
+            if fmt == "docx":
+                data = mod.docx_bytes(blocks, title=name)
+            else:
+                data = mod.xlsx_bytes(blocks, name=name)
+            if not isinstance(data, (bytes, bytearray)) or not data:
+                raise ValueError("empty office bytes")
+        except Exception as e:                   # ImportError / no tables / 其它
+            log_warn(f"导出 {fmt} 失败（{type(e).__name__}: {e}），"
+                     f"已降级为 Markdown")
+            return None
+        out_dir = self.output_dir()
+        out = out_dir / f"{name}.{fmt}"
+        i = 1
+        while out.exists():
+            out = out_dir / f"{name} ({i}).{fmt}"
+            i += 1
+        tmp = out.with_name(out.name + ".tmp")
+        try:
+            tmp.write_bytes(bytes(data))
+            os.replace(tmp, out)
+        except OSError as e:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            log_warn(f"导出 {fmt} 写盘失败（{type(e).__name__}: {e}），"
+                     f"已降级为 Markdown")
+            return None
+        return out
+
     def _save_output(self, name: str, result: dict, fmt: str = "md") -> Path:
-        """识别结果落盘。fmt = "md"（默认）/ "txt" / "json"。
+        """识别结果落盘。fmt = md / txt / json / docx / xlsx。
 
         先写 `<out>.tmp` 再 os.replace：中途崩溃/被杀不会留下半截结果文件
         （旧实现直接 write_text，断电或 os._exit 会留下截断的 .md）。
@@ -1446,11 +1520,19 @@ class WebBackend:
           {"version": 1, "name": "<净化后的名字>",
            "pages": [{"page": 1, "blocks": [{...}, ...]}, ...]}
         blocks 直接来自引擎（原始像素坐标、渲染片段），后端不加工。
+
+        docx/xlsx（E9/E10）：交给 office_export 从 blocks 生成；**失败时
+        降级写 `.md`**（返回的 Path 后缀即实际格式，调用方据此报 savedFormat）。
         """
         out_dir = self.output_dir()          # E19：可配置输出目录（空 → OUTPUT_DIR）
         out_dir.mkdir(parents=True, exist_ok=True)
         name = self._sanitize_name(name)          # 兜底：调用方已净化也不亏
         ext = fmt if fmt in _OUT_FORMATS else "md"
+        if ext in _OFFICE_FORMATS:
+            saved = self._save_office(name, result, ext)
+            if saved is not None:
+                return saved
+            ext = "md"                           # 降级：走下面的 Markdown 分支
         out = out_dir / f"{name}.{ext}"
         i = 1
         while out.exists():
@@ -1852,6 +1934,45 @@ class WebBackend:
             log_error("导出可搜索 PDF 失败", exc=e)
             return {"ok": False, "error": str(e)[:300]}
         return {"ok": True, "path": str(out)}
+
+    # ── E9/E10：docx / xlsx 导出（只在响应里回字节，不写盘）──────────
+    def export_office(self, fmt: str) -> dict:
+        """把最近一次识别的 blocks 导出为 docx/xlsx，**字节只随响应返回**。
+
+        契约：成功 → {"ok": True, "name": "<净化名>.<ext>", "data_b64": ...}
+        （base64 供前端用保存对话框下载，不落盘，避免和「自动保存」重复写）；
+        失败 → {"ok": False, "error": tr("err.officeUnavailable")}；xlsx 没有
+        可导出表格 → {"ok": False, "error": tr("err.officeNoTable")}。
+        fmt 只接受 docx/xlsx（其它一律按「不可用」返回，不抛异常）。
+        """
+        fmt_norm = str(fmt or "").strip().lower()
+        if fmt_norm not in _OFFICE_FORMATS:
+            return {"ok": False, "error": tr("err.officeUnavailable")}
+        ctx = self._last_result
+        if not ctx or not ctx.get("blocks"):
+            return {"ok": False, "error": tr("err.officeUnavailable")}
+        try:
+            mod = _office_export()
+            if fmt_norm == "docx":
+                data = mod.docx_bytes(ctx["blocks"],
+                                      title=str(ctx.get("name") or ""))
+            else:
+                data = mod.xlsx_bytes(ctx["blocks"],
+                                      name=str(ctx.get("name") or ""))
+        except ValueError as e:
+            if fmt_norm == "xlsx" and "no tables" in str(e).lower():
+                return {"ok": False, "error": tr("err.officeNoTable")}
+            log_error(f"导出 {fmt_norm} 失败", exc=e)
+            return {"ok": False, "error": tr("err.officeUnavailable")}
+        except Exception as e:                   # 模块缺失/生成异常
+            log_error(f"导出 {fmt_norm} 失败", exc=e)
+            return {"ok": False, "error": tr("err.officeUnavailable")}
+        if not isinstance(data, (bytes, bytearray)) or not data:
+            return {"ok": False, "error": tr("err.officeUnavailable")}
+        name = self._sanitize_name(ctx.get("name") or "result")
+        return {"ok": True,
+                "name": f"{name}.{fmt_norm}",
+                "data_b64": base64.b64encode(bytes(data)).decode("ascii")}
 
     def browse_folder(self, start: str = "", title: str = "") -> dict:
         try:

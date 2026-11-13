@@ -293,7 +293,7 @@ class OutFormatSettingTest(_BackendCase):
 
     def test_mixed_patch_with_bad_format_writes_nothing(self):
         res = self.backend.set_settings({"theme": "dark",
-                                         "outFormat": "docx"})
+                                         "outFormat": "xml"})
         self.assertIs(res.get("ok"), False)
         self.assertEqual(self.saved().get("theme", "light"), "light")
 

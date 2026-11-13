@@ -55,7 +55,7 @@ python）。不要 `cd` 到别的目录再调用相对路径的 `cli.py`——�
 | `--recursive` | 目录输入时递归子目录 |
 | `--prompt "<指令>"` | 识别指令（留空 = 模型默认的文档解析） |
 | `--out <目录>` | 结果落盘目录，默认当前目录；不存在会自动创建 |
-| `--format md\|txt\|json\|pdf` | 每份结果的落盘格式，缺省 `md`；`pdf` = 可搜索 PDF（**只支持单个 PDF 输入**，见 §3.4） |
+| `--format md\|txt\|json\|pdf\|docx\|xlsx` | 每份结果的落盘格式，缺省 `md`；`pdf` = 可搜索 PDF（**只支持单个 PDF 输入**，见 §3.4）；`docx`/`xlsx` = 结构化 Office 导出（**需要引擎 blocks**，见 §3.5） |
 | `--device auto\|cuda\|cpu` | 推理设备，默认 `auto`（有 NVIDIA 用 CUDA，否则 CPU） |
 | `--max-page-tokens N` | 单页输出 token 上限。**引擎支持时透传，否则告警忽略**（见 §5） |
 | `--max-merged-pages N` | 每次请求最多合并多少页。引擎支持时透传；否则 CLI 侧按 N 页分块 |
@@ -77,7 +77,7 @@ python）。不要 `cd` 到别的目录再调用相对路径的 `cli.py`——�
 
 ## 3. 输出契约
 
-### 3.1 落盘（`--format md|txt|json|pdf`）
+### 3.1 落盘（`--format md|txt|json|pdf|docx|xlsx`）
 
 文件名 = 输入文件名的 stem（非法字符净化、超长截断，同 GUI），后缀随格式；
 **同名不覆盖**：`a.md` 已存在时依次写 `a (1).md`、`a (2).md`。
@@ -86,6 +86,7 @@ python）。不要 `cd` 到别的目录再调用相对路径的 `cli.py`——�
 - `txt`：复用后端 `_md_to_plain`（去标题井号/粗斜体/链接/代码围栏，表格单元格转 tab）
 - `json`：见下（每份结果一个 JSON 文件）
 - `pdf`：**可搜索 PDF**——在原 PDF 上叠不可见文本层（见 §3.4）
+- `docx`/`xlsx`：**结构化 Office 导出**（正文/表格进 Word；Excel 只导表格，见 §3.5）
 
 ### 3.2 `--json` 的 stdout
 
@@ -215,6 +216,31 @@ python cli.py --input report.pdf --format pdf --out ./out
   文件名取输入 PDF 的 stem（同样同名递增），且写文件是原子的
   （`<name>.pdf.tmp.pdf` → `os.replace`，崩溃不留半截文件）。
 
+### 3.5 结构化 Office 导出（`--format docx|xlsx`）
+
+```bash
+python cli.py --input report.pdf --format docx --out ./out   # → ./out/report.docx
+python cli.py --input table.png  --format xlsx --out ./out   # → ./out/table.xlsx
+```
+
+- **数据来源**：引擎返回的 `blocks`（E2 版面块，与 JSON 里的 `pages`→`blocks`
+  同一份数据）。docx 导出正文/标题/表格的结构化内容；xlsx **只导表格**。
+- **前提与失败**：结果里没有 `blocks`（旧引擎/非结构化结果）→ 退出码 **2**
+  （文案提示需要结构化结果）；`xlsx` 而结果里没有可导出表格 → 退出码 **2**；
+  `office_export` 模块/写盘异常 → 退出码 **2**。成功写 `<stem>.docx/.xlsx`
+  （原子 `<name>.tmp` → `os.replace`，同名递增）。
+- **与 GUI 的关系**：GUI 有两种 Office 导出——①设置里「输出格式 = Word/Excel」
+  时识别结束**自动落盘**（后端 `_save_output`）；②识别完成后点「导出」按钮
+  （`POST /api/export-office`），后端把字节 base64 放进响应、由前端用保存对话框
+  下载，**不写盘**。CLI 等价于 ①的即时版：直接写 `--out` 目录。
+- **降级语义（GUI 自动保存）**：GUI 勾了 docx/xlsx 但结果没有 `blocks`、
+  或 xlsx 没有表格、或 Office 生成失败时，后端会 `log_warn` 并**降级写 `.md`**，
+  识别本身仍算成功（响应里的 `savedFormat` 会显示实际落盘格式 `md`）。
+  **CLI 不降级**：`--format docx|xlsx` 失败直接退出码 2，避免用户以为拿到了
+  Office 文件。
+- **格式细节**：`.docx`/`.xlsx` 都是标准 OOXML（zip 容器，分别含
+  `word/document.xml`、`xl/workbook.xml`），可用 Word/Excel/WPS/LibreOffice 打开。
+
 ---
 
 ## 4. 退出码
@@ -223,7 +249,7 @@ python cli.py --input report.pdf --format pdf --out ./out
 |---|---|---|
 | **0** | 全部成功 | 正常结束 |
 | **1** | 参数错误 | 缺 `--input`、路径不存在、扩展名不支持、`--pages` 语法错、`--out` 不可写、未知参数、`--format pdf` 但输入不是单个 PDF |
-| **2** | 环境 / 模型错误 | 模型文件不完整、未装 torch 推理组件、CUDA 组件不匹配、模型加载失败、PDF 输入缺 pymupdf、`--format pdf` 但引擎没给 blocks |
+| **2** | 环境 / 模型错误 | 模型文件不完整、未装 torch 推理组件、CUDA 组件不匹配、模型加载失败、PDF 输入缺 pymupdf、`--format pdf` 但引擎没给 blocks、`--format docx\|xlsx` 但没 blocks / xlsx 无表格 / Office 生成失败 |
 | **3** | 有文件失败 | 单个文件识别异常（其余文件继续），**全部失败也返回 3** |
 | **130** | 被中断 | 运行时 Ctrl+C（`engine.cancel_event` 会置位） |
 

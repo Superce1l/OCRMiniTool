@@ -1424,6 +1424,22 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
 
+/* ── E9/E10 Word / Excel：后端按 blocks 生成文件并回传 base64 ──────
+   前端只做 base64 → Uint8Array → Blob（整块转换，避免逐字符 push 的 O(n²)），
+   再用既有 downloadBlob 下载。收不到 data_b64/name 就当作失败，不生成空文件。 */
+const OFFICE_MIME = {
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+};
+function base64ToBlob(b64, mime) {
+  const clean = String(b64 || "").replace(/\s+/g, "");
+  const bin = atob(clean);
+  const len = bin.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mime || "application/octet-stream" });
+}
+
 /* ── E8 可搜索 PDF：只导出后端缓存的本轮识别版面块（blocks）────────
    与前端编辑稿无关（按钮 title 已注明），后端负责生成 PDF。
    可见性随结果切换重算：showResultPages / 批量项切换 / 重试后都调用
@@ -1451,7 +1467,7 @@ $("#btn-export-pdf").addEventListener("click", async () => {
   }
 });
 
-$("#btn-save").addEventListener("click", () => {
+$("#btn-save").addEventListener("click", async () => {
   const r = state.lastResult;
   if (!r) return;
   const outFormat = String((state.settings && state.settings.outFormat) || "md").toLowerCase();
@@ -1460,6 +1476,18 @@ $("#btn-save").addEventListener("click", () => {
   const rawBase = (r.outPath ? String(r.outPath).split(/[\\/]/).pop() : "ocr-result") || "ocr-result";
   const stem = rawBase.replace(/\.(md|txt|json)$/i, "") || "ocr-result";
   try {
+    // E9/E10：Word / Excel 必须由后端生成（前端不拼字节），成功后 base64 本地下载
+    if (outFormat === "docx" || outFormat === "xlsx") {
+      const res = await API.exportOffice(outFormat);
+      if (!res || !res.ok || !res.name || !res.data_b64) {
+        flashError((res && res.error) || t("err.officeUnavailable"));
+        return;
+      }
+      const mime = OFFICE_MIME[outFormat] || "application/octet-stream";
+      downloadBlob(base64ToBlob(res.data_b64, mime), String(res.name));
+      flash(t("msg.officeExported", { name: res.name }));
+      return;
+    }
     if (outFormat === "json") {
       // E2：结构化导出，schema 与后端落盘 .json 完全一致：
       // {"version":1,"name":<stem>,"pages":[{page,blocks:[…]}, …]}

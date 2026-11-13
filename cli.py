@@ -94,6 +94,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "err.pdfNeedsPdfInput": "可搜索 PDF 只支持「单个 PDF 输入」（--format pdf）",
         "err.pdfNoBlocks": "引擎没有返回版面 blocks，无法生成可搜索 PDF",
         "err.pdfExportFailed": "生成可搜索 PDF 失败：{err}",
+        "err.officeNeedsBlocks": "引擎没有返回版面 blocks，无法生成 docx/xlsx（需要结构化结果）",
+        "err.officeNoTable": "Excel 只导出表格；当前结果里没有可导出的表格",
+        "err.officeExportFailed": "生成 {fmt} 失败：{err}",
+        "info.officeOk": "  ✓ {name} → {fmt}：{path}",
         "info.pdfOk": "  ✓ {name} → 可搜索 PDF：{path}",
         "warn.pagesIgnored": "--pages 只对 PDF 生效，已忽略：{name}",
         "warn.noPageTokens": "当前引擎不支持 --max-page-tokens，已忽略",
@@ -140,6 +144,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "err.pdfNeedsPdfInput": "searchable PDF requires a single PDF input (--format pdf)",
         "err.pdfNoBlocks": "engine returned no layout blocks; cannot build a searchable PDF",
         "err.pdfExportFailed": "searchable PDF export failed: {err}",
+        "err.officeNeedsBlocks": "engine returned no layout blocks; docx/xlsx needs structured output",
+        "err.officeNoTable": "Excel exports tables only; this result has no tables",
+        "err.officeExportFailed": "failed to build {fmt}: {err}",
+        "info.officeOk": "  ✓ {name} → {fmt}: {path}",
         "info.pdfOk": "  ✓ {name} → searchable PDF: {path}",
         "warn.pagesIgnored": "--pages only applies to PDF, ignored: {name}",
         "warn.noPageTokens": "current engine has no --max-page-tokens; ignored",
@@ -266,8 +274,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--recursive", action="store_true", help="--input 是目录时递归子目录")
     ap.add_argument("--prompt", default="", help="识别指令（留空 = 模型默认文档解析）")
     ap.add_argument("--out", default=None, help="输出目录（默认当前目录）")
-    ap.add_argument("--format", choices=("md", "txt", "json", "pdf"), default=None,
-                    help="每份结果的落盘格式（默认 md；pdf=可搜索 PDF，需单个 PDF 输入）")
+    ap.add_argument("--format", choices=("md", "txt", "json", "pdf", "docx", "xlsx"),
+                    default=None,
+                    help="每份结果的落盘格式（默认 md；pdf=可搜索 PDF，"
+                         "docx/xlsx=结构化导出，需单个输入且引擎给 blocks）")
     ap.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto",
                     help="推理设备（默认 auto）")
     ap.add_argument("--max-page-tokens", type=int, default=None,
@@ -629,6 +639,32 @@ def _build_searchable_pdf(source: Path, blocks: list, target: Path,
                                 dpi=PDF_DPI, page_range=page_range)
 
 
+def _write_office(target: Path, fmt: str, blocks: list, name: str) -> Path:
+    """E9/E10：把 E2 页信封 blocks 写成 docx/xlsx（原子 tmp→replace）。
+
+    office_export 由另一路同事实现（签名固定）；本函数只负责写盘。
+    xlsx 无表格时 office_export 抛 ValueError("no tables")，由调用方转成退出码 2。
+    """
+    from office_export import docx_bytes, xlsx_bytes
+    if fmt == "docx":
+        data = docx_bytes(blocks, title=name)
+    else:
+        data = xlsx_bytes(blocks, name=name)
+    if not data:
+        raise ValueError("empty office bytes")
+    tmp = target.with_name(target.name + ".tmp")
+    try:
+        tmp.write_bytes(bytes(data))
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return target
+
+
 def _write_output(out_dir: Path, source: Path, fmt: str, result: dict) -> Path:
     """每份结果落盘（--out 目录；md/txt/json 三选一）。返回实际路径。"""
     stem = _sanitize_stem(source.stem)
@@ -904,6 +940,30 @@ def main(argv: list[str] | None = None, engine_factory=None) -> int:
                                 traceback.print_exc(file=sys.stderr)
                             return EXIT_ENV
                         res["outPath"] = str(target)
+                    elif fmt in ("docx", "xlsx"):
+                        # E9/E10：结构化导出；无 blocks / 无表格 → 退出码 2
+                        blocks = res.get("blocks")
+                        if not blocks:
+                            _err(_msg(lang, "err.officeNeedsBlocks"))
+                            return EXIT_ENV
+                        stem = _sanitize_stem(path.stem)
+                        target = _unique_path(out_dir / f"{stem}.{fmt}")
+                        try:
+                            _write_office(target, fmt, blocks, stem)
+                        except ValueError as e:
+                            key = ("err.officeNoTable"
+                                   if "no tables" in str(e).lower()
+                                   else "err.officeExportFailed")
+                            _err(_msg(lang, key, fmt=fmt, err=e))
+                            return EXIT_ENV
+                        except Exception as e:
+                            _err(_msg(lang, "err.officeExportFailed",
+                                      fmt=fmt, err=e))
+                            if args.verbose:
+                                traceback.print_exc(file=sys.stderr)
+                            return EXIT_ENV
+                        res["outPath"] = str(target)
+                        res["savedFormat"] = fmt
                     else:
                         res["outPath"] = str(
                             _write_output(out_dir, path, fmt, res))
@@ -912,6 +972,9 @@ def main(argv: list[str] | None = None, engine_factory=None) -> int:
                     if fmt == "pdf":
                         _out(_msg(lang, "info.pdfOk", name=path.name,
                                   path=res.get("outPath")))
+                    elif fmt in ("docx", "xlsx"):
+                        _out(_msg(lang, "info.officeOk", name=path.name,
+                                  fmt=fmt, path=res.get("outPath")))
                     else:
                         key = ("info.fileOk" if res.get("outPath")
                                else "info.fileOkNoOut")

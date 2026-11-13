@@ -161,6 +161,15 @@
       }
       return { ok: false, error: "mock" };
     },
+    // E9/E10：Word / Excel 由后端按识别 blocks 生成，前端只接收 base64 再本地下载。
+    // fmt: "docx" | "xlsx"；失败按 apiPost 口径返回 {ok:false,error}。
+    async exportOffice(fmt) {
+      if (MODE === "web") {
+        try { return await apiPost("/api/export-office", { fmt }); }
+        catch (e) { return { ok: false, error: String(e) }; }
+      }
+      return { ok: false, error: "mock" };
+    },
     async startDownload() {
       if (MODE === "web") return apiPost("/api/download", {});
       mockDownload(); return { ok: true };
