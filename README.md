@@ -29,7 +29,10 @@
 - 📋 **粘贴截图 + 键盘操作**：Ctrl+V 直接把剪贴板图片加入队列；Ctrl+Enter 开始识别、
   Esc 取消；拖放区可用 Tab 聚焦；进度、日志与结果对读屏软件有语义
 - 📁 **整目录识别**：选一个文件夹即批量入列（后端直读路径，不上传、不占临时盘）
-- 🔁 **失败可重试**：批量模式下单个文件失败不影响队列，失败项可看完整错误并只重跑失败项
+- 🔁 **失败可重试**：批量模式下单个文件失败不影响队列，失败项可看完整错误并只重跑失败项；
+  所有成功项还能一键「**导出全部（合并）**」成一份带文件小标题的 Markdown
+- 📂 **可配置输出目录**：设置页可指定输出与「最近识别」的目录（留空 = 程序目录下 `outputs`），
+  「打开输出文件夹」与历史列表都会跟随
 - 💻 **无头 CLI**：`python cli.py --input <文件/目录> [--json]`，给脚本与自动化用
   （见 [docs/cli.md](docs/cli.md)）
 - ⬇️ **模型一键下载**：约 6.8 GB 权重从 HuggingFace 下载，支持断点续传、完整性校验、
@@ -90,8 +93,9 @@
 6. **整目录识别**：「选择文件夹」后由后端直接读路径批量入列（不上传、不占临时盘），
    扫描到上限时会如实告知「只取了前 N 个」
 7. **失败可自救**：批量模式下单个文件失败不中断队列，失败项可展开完整错误，并「只重跑失败项」；
-   识别失败会同时在页面顶部弹出**可关闭的错误横幅**（日志仍写到底部日志区与 `logs/`），
-   不会再出现「点了没反应」
+   成功项可一键「**导出全部（合并）**」——按原顺序拼成一份 Markdown（每份带 `# 文件名` 小标题，
+   `---` 分隔），文件名 `<首个成功项>-全部.md`；识别失败会同时在页面顶部弹出**可关闭的错误横幅**
+   （日志仍写到底部日志区与 `logs/`），不会再出现「点了没反应」
 8. 输出被截断、页数与预期不符、或表格列数异常时，结果区顶部会出提示条：前两者
    直接告诉你该调「单页生成上限」还是「合并页数上限」，表格问题则提示核对
 9. **大文件护栏**：单次请求合计超过 150 页（批量模式按单个文件计）或单文件超过 512 MB 会直接
@@ -145,6 +149,7 @@
 | **PDF 页范围** | 只识别 PDF 的指定页，如 `1-3,5,10-`（留空＝全部；仅对 PDF 生效；大 PDF 只选几页时不受 150 页护栏限制） |
 | **合并段落断行** | 把被硬换行拆开的同段文本接回去（跳过代码、表格、列表；诗歌等特殊排版请关闭）。默认关闭 |
 | **中英文之间加空格** | 在中文与英文/数字之间补一个空格（跳过 URL、代码、表格）。默认关闭 |
+| **输出目录** | 识别结果与「最近识别」的保存位置；留空 = 程序目录下 `outputs`。改目录不移动已有文件；目录不可写会直接提示 |
 | **外观主题** | 浅色／深色／跟随系统 |
 | **界面缩放** | 调整文字与控件大小 |
 | **界面语言** | 下拉选择（中文默认 / English…）；选项自动发现自 `webview/locales/`，持久化到 `settings.json` 的 `lang` |
@@ -190,7 +195,7 @@ webview/locales/        # 语言包 en / zh（前后端共用，加语言=加一
 assets/make_icon.py     # 图标生成（Pillow 绘制 → PNG/ICO）
 OCRMiniTool.spec        # PyInstaller onedir 打包配置
 runtime_hook_utf8.py    # 冻结运行时 UTF-8 / 证书修复钩子
-tests/                  # 回归套件（stdlib unittest，756 用例，无需模型/GPU/GUI）
+tests/                  # 回归套件（stdlib unittest，807 用例，无需模型/GPU/GUI）
 tools/check.py          # 静态体检（语法/JSON/语言包键对齐/i18n 键引用/行尾）
 tools/normalize_eol.py  # 行尾归一（幂等）
 .github/workflows/ci.yml# CI：测试 + 体检 + 前端消毒器对抗测试
@@ -221,10 +226,13 @@ rem 前置：构建环境里**不要装 torch/torchvision** —— OCRMiniTool.s
 rem 会直接拒绝打包（安装包不含推理引擎，用户按显卡下载组件）。确需硬绕过时
 rem 才设 OCRMIT_ALLOW_BUNDLED_TORCH=1（Analysis 仍会排除 torch）。
 pip install -r requirements-build.txt
-pyinstaller --clean --noconfirm --distpath dist --workpath build OCRMiniTool.spec
-rem 产出 dist\OCRMiniTool\（exe + _internal\）；发行 zip 打整个文件夹。
-rem 包名里的版本号取自 version.py 的 APP_VERSION（勿手写；下文 <version> 处替换）：
-powershell -NoProfile -Command "Compress-Archive -Path dist\OCRMiniTool -DestinationPath dist\OCRMiniTool-v<version>-windows-x64.zip -Force"
+python tools/build_exe.py --zip    rem 推荐：预检 → 写 EXE 版本资源 → PyInstaller → 自检 → 打 zip + SHA256
+rem 或手工：
+rem pyinstaller --clean --noconfirm --distpath dist --workpath build OCRMiniTool.spec
+rem 产出 dist\OCRMiniTool\（exe + _internal\）；EXE 属性里可见 FileVersion/ProductVersion
+rem （由 version.py 的 APP_VERSION 生成 build\OCRMiniTool_version_info.txt，勿手写版本号）。
+rem 发布前自检（工作区干净、tag 指向 HEAD、产物哈希）：
+python tools/release_check.py --tag v<version> --write-sums
 ```
 
 推理引擎组件（cpu / cu128）单独构建并发布到 GitHub Release：
