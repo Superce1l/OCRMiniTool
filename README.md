@@ -24,6 +24,8 @@
   明确提示「期望 N 页、实际 M 页」并给出该调哪个参数
 - 🧹 **页眉页脚去重**（可选）：书籍/论文扫描件可去掉页眉、页脚、页码噪声
 - 📄 **PDF 指定页范围**：只识别需要的页（如 `1-3,5,10-`），几百页的 PDF 不必整本跑
+- 🔎 **可搜索 PDF 导出**：扫描版 PDF 识别后可一键导出带**不可见文本层**的 PDF——
+  原页面不变、文字可搜索/可复制/可选中（中文用内置字体，无需装 Office/字体）
 - ✨ **后处理开关**（可选）：合并段落断行、中英文之间补空格；LaTeX 定界符自动归一；
   表格列数异常时结果区给出提示
 - 📋 **粘贴截图 + 键盘操作**：Ctrl+V 直接把剪贴板图片加入队列；Ctrl+Enter 开始识别、
@@ -33,8 +35,8 @@
   所有成功项还能一键「**导出全部（合并）**」成一份带文件小标题的 Markdown
 - 📂 **可配置输出目录**：设置页可指定输出与「最近识别」的目录（留空 = 程序目录下 `outputs`），
   「打开输出文件夹」与历史列表都会跟随
-- 💻 **无头 CLI**：`python cli.py --input <文件/目录> [--json]`，给脚本与自动化用
-  （见 [docs/cli.md](docs/cli.md)）
+- 💻 **无头 CLI**：`python cli.py --input <文件/目录> [--json] [--format md|txt|json|pdf]`，
+  给脚本与自动化用（`--format pdf` = 可搜索 PDF，需单个 PDF 输入；见 [docs/cli.md](docs/cli.md)）
 - ⬇️ **模型一键下载**：约 6.8 GB 权重从 HuggingFace 下载，支持断点续传、完整性校验、
   镜像站（如 hf-mirror.com）加速
 - 🖥️ **CUDA / CPU 自适应**：有 NVIDIA 显卡自动用 CUDA + bfloat16；否则纯 CPU
@@ -107,6 +109,9 @@
    （在提示词/结果编辑框里粘贴仍按普通文本处理）
 12. **键盘可用**：Ctrl+Enter 开始识别、Esc 取消（仅识别中生效）；拖放区可 Tab 聚焦、
    Enter/Space 打开选择框；历史条目的删除按钮可用 Enter/Space 触发
+13. **可搜索 PDF**：以「合并解析」识别单个 PDF 后，工具栏出现「**导出可搜索 PDF**」——
+   在原 PDF 上叠加不可见文本层（可搜索/可复制/可选中），文件存到输出目录；
+   批量模式或非 PDF 输入不显示该按钮。文本层由识别结果（含 bbox）生成，**不随前端编辑**
 
 ### 模型
 
@@ -195,7 +200,7 @@ webview/locales/        # 语言包 en / zh（前后端共用，加语言=加一
 assets/make_icon.py     # 图标生成（Pillow 绘制 → PNG/ICO）
 OCRMiniTool.spec        # PyInstaller onedir 打包配置
 runtime_hook_utf8.py    # 冻结运行时 UTF-8 / 证书修复钩子
-tests/                  # 回归套件（stdlib unittest，807 用例，无需模型/GPU/GUI）
+tests/                  # 回归套件（stdlib unittest，875 用例，无需模型/GPU/GUI）
 tools/check.py          # 静态体检（语法/JSON/语言包键对齐/i18n 键引用/行尾）
 tools/normalize_eol.py  # 行尾归一（幂等）
 .github/workflows/ci.yml# CI：测试 + 体检 + 前端消毒器对抗测试
