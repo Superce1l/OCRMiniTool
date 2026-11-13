@@ -45,6 +45,9 @@
   保存与复制取改后的内容）、逐页查看、复制全文、另存 `.md` / `.txt` / `.json`（输出格式在设置页选择）
 - 📦 **结构化 JSON 输出**：每页的版面块（类型 / 标题层级 / bbox 坐标 / 阅读序 / 渲染片段），
   GUI 导出、CLI `--format json` 与 HTTP 响应三处同构——可直接给下游做表格重建、版面分析、坐标定位
+- 📄 **Word / Excel 导出**：识别结果可直出 **.docx**（标题层级、正文、真实表格，含合并单元格）
+  或 **.xlsx**（每个表格一个工作表、合并单元格/数字自动识别）；用 stdlib 手写 OOXML，
+  **不新增任何运行时依赖**，保存按钮与自动落盘都支持
 - 🔎 **结果内查找 / 替换**：在原文视图里查找、上一个/下一个定位、替换与全部替换，
   改完仍可保存（多页结果按当前页处理，「全部」视图只读）
 - ⏹️ **识别可中断**：流式解码 + 实时「已生成 N 字」，取消在**解码阶段** 1～2
@@ -146,7 +149,7 @@
 | **模型下载位置** | Unlimited-OCR-2 的存储目录；留空＝程序目录下的 `models/Unlimited-OCR-2` |
 | **HuggingFace 镜像站** | 直连 huggingface.co 较慢或失败时改用镜像（如 `hf-mirror.com`） |
 | **推理设备** | 自动（有 NVIDIA **且显存 ≥8 GB** 用 CUDA；不足 8 GB 自动用 CPU，因为小显存会把权重挤到共享内存、反而更慢）/ CUDA / CPU |
-| **输出格式** | 识别结果自动保存与「保存」按钮导出的文件格式：Markdown（`.md`）/ 纯文本（`.txt`）/ **JSON（页/块/层级/坐标，见 [docs/cli.md](docs/cli.md) 的 JSON schema）** |
+| **输出格式** | 识别结果自动保存与「保存」按钮导出的文件格式：Markdown（`.md`）/ 纯文本（`.txt`）/ **JSON（页/块/层级/坐标）** / **Word（`.docx`）** / **Excel（`.xlsx`，仅表格，每个表一个工作表）**。JSON schema 见 [docs/cli.md](docs/cli.md)；Office 导出在结果缺少结构化数据或没有表格时会自动降级为 Markdown（GUI），CLI 则直接报错 |
 | **单页生成上限** | 单页最多生成多少 token（默认 4096；0 = 不限）。调小可避免超长页跑几小时，调大可减少长表格被截断 |
 | **合并页数上限** | 合并解析一次请求最多几页（默认 20；0 = 不限）。超出自动分组，组间可取消，但跨组不共享上下文 |
 | **图像切片模式** | 自动 / gundam（细节更全、更慢）/ base（更快）。自动=单图 gundam、多页 base；**base 会压缩超长图并可能丢小字，长截图建议用自动或 gundam** |
@@ -200,7 +203,7 @@ webview/locales/        # 语言包 en / zh（前后端共用，加语言=加一
 assets/make_icon.py     # 图标生成（Pillow 绘制 → PNG/ICO）
 OCRMiniTool.spec        # PyInstaller onedir 打包配置
 runtime_hook_utf8.py    # 冻结运行时 UTF-8 / 证书修复钩子
-tests/                  # 回归套件（stdlib unittest，875 用例，无需模型/GPU/GUI）
+tests/                  # 回归套件（stdlib unittest，956 用例，无需模型/GPU/GUI）
 tools/check.py          # 静态体检（语法/JSON/语言包键对齐/i18n 键引用/行尾）
 tools/normalize_eol.py  # 行尾归一（幂等）
 .github/workflows/ci.yml# CI：测试 + 体检 + 前端消毒器对抗测试
