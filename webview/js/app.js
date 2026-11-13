@@ -1000,8 +1000,8 @@ function showBatchResult(result) {
     total: items.length,
     time: fmtTime(result.elapsed),
   });
-  // 失败项可重试；失败原因在下方详情区完整展示
-  $("#batch-actions").hidden = !items.some(it => it && !it.ok);
+  // 失败项可重试；成功项可合并导出；失败原因在下方详情区完整展示
+  updateBatchActions(items);
   $("#batch-error").hidden = true;
   $(".md-wrap").hidden = false;
   renderResultWarn(batchWarnLines(result));
@@ -1334,6 +1334,45 @@ async function retryFailedItems() {
   }
 }
 $("#btn-retry-failed").addEventListener("click", retryFailedItems);
+
+/* ── E16 批量合并导出：只合并成功项，按原顺序拼成一份 Markdown ────── */
+function batchOkItems() {
+  return (state.batchItems || []).filter(it => it && it.ok);
+}
+// 批量动作栏可见性：重试=有失败项；导出=至少一个成功项（retry 后重算）
+function updateBatchActions(items) {
+  const list = Array.isArray(items) ? items : (state.batchItems || []);
+  const hasOk = list.some(it => it && it.ok);
+  const hasFail = list.some(it => it && !it.ok);
+  const box = $("#batch-actions");
+  if (box) box.hidden = !(hasOk || hasFail);
+  const retry = $("#btn-retry-failed");
+  if (retry) retry.hidden = !hasFail;
+  const exportBtn = $("#btn-export-all");
+  if (exportBtn) exportBtn.hidden = !hasOk;
+}
+// 文件名 stem：优先用后端落盘名（outPath 的 basename），退化到条目名
+function batchStem(it) {
+  const raw = (it && it.outPath ? String(it.outPath).split(/[\\/]/).pop() : "")
+    || (it && it.name) || "result";
+  return String(raw).replace(/\.(md|txt|json)$/i, "") || "result";
+}
+function exportAllBatch() {
+  const okItems = batchOkItems();
+  if (!okItems.length) { flashError(t("msg.exportAllEmpty")); return; }
+  // 文本取 it.text：前端编辑过就是编辑稿（applyResultEdit 已回写）
+  const content = okItems
+    .map(it => `# ${it.name}\n\n${it.text || ""}`)
+    .join("\n\n---\n\n");
+  const filename = batchStem(okItems[0]) + "-全部.md";
+  try {
+    downloadBlob(new Blob([content], { type: "text/markdown;charset=utf-8" }), filename);
+    flash(t("msg.exportAllDone", { n: okItems.length, name: filename }));
+  } catch (e) {
+    flashError(t("msg.genericFailed", { err: e.message || e }));
+  }
+}
+$("#btn-export-all").addEventListener("click", exportAllBatch);
 
 /* 复制 / 保存 */
 $("#btn-copy").addEventListener("click", async () => {
@@ -1808,6 +1847,8 @@ function fillSettings(s) {
   state.settings = s;
   $("#set-model-dir").value = s.modelDir || "";
   $("#set-mirror").value = s.mirror || "";
+  // E19：输出目录（空 = 默认 outputs/）；后端未返回该键时按空值回填
+  $("#set-out-dir").value = s.outputDir || "";
   setScaleSelect(s.scale || 100);
   $$("#set-device button").forEach(b => b.classList.toggle("on", b.dataset.v === (s.devicePref || "auto")));
   $$("#set-theme button").forEach(b => b.classList.toggle("on", b.dataset.v === (s.theme || "light")));
@@ -1838,6 +1879,14 @@ function pushSettings(patch) {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(flushSettings, 250);
 }
+async function revertSettingsFromServer() {
+  // 提交被后端拒绝（ok:false / 409 / 校验失败）时，把界面回填成后端实际值，
+  // 避免输入框一直显示一个没落盘的值。后端不可达时保持现状（有 flashError）。
+  try {
+    const cur = await API.getSettings();
+    if (cur && cur.ok !== false) fillSettings(cur);
+  } catch { /* 取不到就保持现状 */ }
+}
 async function flushSettings() {
   const patch = pendingSettings;
   pendingSettings = {};
@@ -1846,6 +1895,7 @@ async function flushSettings() {
     const s = await API.setSettings(patch);
     if (!s || s.ok === false) {
       flashError((s && s.error) || t("msg.genericFailed", { err: "settings" }));
+      await revertSettingsFromServer();
       return;
     }
     fillSettings(s);
@@ -1854,6 +1904,7 @@ async function flushSettings() {
     flash(t("msg.settingsSaved"));
   } catch (e) {
     flashError(t("msg.genericFailed", { err: e.message || e }));
+    await revertSettingsFromServer();
   }
 }
 $("#set-model-dir").addEventListener("change", () => pushSettings({ modelDir: $("#set-model-dir").value.trim() }));
@@ -1925,6 +1976,34 @@ $("#set-join-lines").addEventListener("change", () => {
 });
 $("#set-cjk-spacing").addEventListener("change", () => {
   pushSettings({ cjkSpacing: $("#set-cjk-spacing").checked });
+});
+
+/* E19：输出目录。边打字边发会反复触发后端校验（相对路径/不可写会拒绝），
+   因此 input 走 400ms debounce、change（失焦/回车）立即提交；
+   被拒绝时 flushSettings 会 flashError 并回填后端实际值。 */
+let outDirTimer = null;
+function commitOutDir() {
+  clearTimeout(outDirTimer);
+  pushSettings({ outputDir: $("#set-out-dir").value.trim() });
+}
+$("#set-out-dir").addEventListener("input", () => {
+  clearTimeout(outDirTimer);
+  const v = $("#set-out-dir").value.trim();
+  outDirTimer = setTimeout(() => { pushSettings({ outputDir: v }); }, 400);
+});
+$("#set-out-dir").addEventListener("change", commitOutDir);
+$("#btn-out-dir-browse").addEventListener("click", async () => {
+  try {
+    const r = await API.browseFolder($("#set-out-dir").value.trim());
+    if (r && r.ok && r.path) {
+      $("#set-out-dir").value = r.path;
+      commitOutDir();
+    } else if (r && r.error) {
+      flashError(t("msg.genericFailed", { err: r.error }));
+    }
+  } catch (e) {
+    flashError(t("msg.genericFailed", { err: e.message || e }));
+  }
 });
 
 /* ── 设置页：Python 解释器（issue #2）──────────────────── */

@@ -35,6 +35,18 @@ if _ilu.find_spec("torch") and os.environ.get("OCRMIT_ALLOW_BUNDLED_TORCH") != "
         "torch（用户在模型页按硬件自选下载）。请在不带 torch 的环境打包，"
         "或设 OCRMIT_ALLOW_BUNDLED_TORCH=1 硬绕过（仍会被排除）。")
 
+# ── D15：Windows 版本资源（EXE 属性里的 FileVersion/ProductVersion）────
+# 由 tools/build_exe.py 的 render_version_info() 从 version.py 生成到
+# build/OCRMiniTool_version_info.txt；**spec 里不写死任何版本号**。
+# 文件不存在（例如直接 pyinstaller 裸跑）时传 None，不影响构建。
+try:
+    _spec_dir = SPECPATH            # PyInstaller 注入：spec 所在目录
+except NameError:                   # 纯文本解析/静态检查环境
+    _spec_dir = os.path.dirname(os.path.abspath(__file__))
+_verfile = os.path.join(_spec_dir, "build", "OCRMiniTool_version_info.txt")
+if not os.path.exists(_verfile):
+    _verfile = None
+
 datas = [
     ('assets/icon.ico', '.'),
     ('webview', 'webview_assets'),
@@ -114,6 +126,8 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    # D15：build/OCRMiniTool_version_info.txt 存在才传；没有就是 None
+    version=_verfile,
     icon=['assets/icon.ico'],
 )
 

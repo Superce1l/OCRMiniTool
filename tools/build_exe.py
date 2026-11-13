@@ -20,6 +20,10 @@
 
 退出码：0 成功；2 预检失败；3 构建失败；4 产物缺失。
 
+构建前会先写 `build/OCRMiniTool_version_info.txt`（内容由 `render_version_info()`
+生成），`OCRMiniTool.spec` 的 `EXE(version=...)` 动态读取它——因此 EXE 属性里
+可见 FileVersion/ProductVersion；不跑构建时（`--dry-run`）不落盘。
+
 只写 `dist/`、`build/`（均已 gitignore），不改任何源文件。
 构建环境怎么搭（干净 venv）见 `docs/build-notes.md` §3.2。
 """
@@ -30,6 +34,7 @@ import hashlib
 import importlib.metadata
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 import time
@@ -44,6 +49,13 @@ EXE_NAME = "OCRMiniTool.exe"
 VERSION_FILE = "version.py"
 DEFAULT_DIST = "dist"
 DEFAULT_WORK = "build"
+
+# D15：Windows EXE 版本资源文件（写进 build/，由 OCRMiniTool.spec 的 EXE(version=...) 读取）
+VERSION_INFO_NAME = "OCRMiniTool_version_info.txt"
+PRODUCT_NAME = "OCR Mini Tool"
+COMPANY_NAME = "Superce1l"
+LEGAL_COPYRIGHT = "Copyright (c) 2026 Superce1l"
+FILE_DESCRIPTION = "OCR Mini Tool（本地 OCR 工具）"
 
 # 构建 venv 必须装好「运行时依赖（除 torch/torchvision 外）」：PyInstaller 只会
 # 收集解释器里真实存在的包，缺一个就是产物启动即 ModuleNotFoundError
@@ -127,6 +139,72 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+# ── D15：Windows 版本资源（EXE 属性里可见版本）───────────────────────
+def version_tuple(version: str) -> tuple[int, int, int, int]:
+    """'1.6.0' → (1, 6, 0, 0)；容忍后缀（'1.6.0-beta.1' → (1,6,0,0)）。"""
+    core = str(version).strip().split("-")[0].split("+")[0]
+    nums = [int(x) for x in re.findall(r"\d+", core)][:4]
+    nums += [0] * (4 - len(nums))
+    return (nums[0], nums[1], nums[2], nums[3])
+
+
+def render_version_info(version: str) -> str:
+    """生成 PyInstaller `VSVersionInfo` 文本（含 filevers/字符串表/翻译）。
+
+    只依赖传入的 version（调用方从 version.py 读，spec 里不写死版本号）。
+    """
+    a, b, c, d = version_tuple(version)
+    # 字符串表里的版本值做最小转义，避免异常版本号破坏语法
+    ver = str(version).replace("\\", "\\\\").replace("'", "\\'")
+    lines = [
+        "# UTF-8",
+        "# 由 tools/build_exe.py 生成（版本号唯一来源：version.py 的 APP_VERSION）",
+        "# 供 PyInstaller 的 EXE(version=...) 使用；不要手改。",
+        "VSVersionInfo(",
+        "  ffi=FixedFileInfo(",
+        f"    filevers=({a}, {b}, {c}, {d}),",
+        f"    prodvers=({a}, {b}, {c}, {d}),",
+        "    mask=0x3f,",
+        "    flags=0x0,",
+        "    OS=0x40004,",
+        "    fileType=0x1,",
+        "    subtype=0x0,",
+        "    date=(0, 0)",
+        "  ),",
+        "  kids=[",
+        "    StringFileInfo([",
+        "      StringTable(",
+        "        '040904B0',",
+        f"        [StringStruct('CompanyName', '{COMPANY_NAME}'),",
+        f"         StringStruct('FileDescription', '{FILE_DESCRIPTION}'),",
+        f"         StringStruct('FileVersion', '{ver}'),",
+        "         StringStruct('InternalName', 'OCRMiniTool'),",
+        f"         StringStruct('LegalCopyright', '{LEGAL_COPYRIGHT}'),",
+        "         StringStruct('OriginalFilename', 'OCRMiniTool.exe'),",
+        f"         StringStruct('ProductName', '{PRODUCT_NAME}'),",
+        f"         StringStruct('ProductVersion', '{ver}')])",
+        "    ]),",
+        "    VarFileInfo([VarStruct('Translation', [1033, 1200])])",
+        "  ]",
+        ")",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def version_info_path(root: Path = ROOT) -> Path:
+    """版本资源文件路径（固定 build/ 下；spec 按 spec 所在目录的 build/ 查找）。"""
+    return Path(root) / DEFAULT_WORK / VERSION_INFO_NAME
+
+
+def write_version_info_file(version: str, root: Path = ROOT) -> Path:
+    """把版本资源写到 build/OCRMiniTool_version_info.txt（幂等覆盖）。"""
+    path = version_info_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_version_info(version), encoding="utf-8", newline="\n")
+    return path
 
 
 def dir_stats(path: Path) -> tuple[int, int]:
@@ -344,16 +422,23 @@ def main(argv: list[str] | None = None, root: Path = ROOT) -> int:
 
     cmd = build_command(sys.executable, root, distpath, workpath,
                         clean=not opts.no_clean)
+    verinfo = version_info_path(root)
     _say(f"[build] 版本：{version}（来自 {VERSION_FILE}）")
+    _say(f"[build] 版本资源：{verinfo}")
     _say(f"[build] 解释器：{sys.executable}")
     _say(f"[build] PyInstaller：{pyinstaller_version()}")
     _say(f"[build] 产物目录：{distpath}")
     _say(f"[build] 工作目录：{workpath}")
 
     if opts.dry_run:
+        _say("[build] dry-run：版本资源不落盘（正式构建会先写它再打包）。")
         _say(f"[build] dry-run，将执行：{' '.join(cmd)}")
         _say("[build] 预检通过；未构建（去掉 --dry-run 才会真的打包）。")
         return EXIT_OK
+
+    # 必须在 PyInstaller 之前写：spec 的 EXE(version=...) 动态读取这个文件
+    written = write_version_info_file(version, root)
+    _say(f"[build] 版本资源已写入：{written}")
 
     started = time.monotonic()
     rc = run_build(cmd, root, opts)
@@ -374,6 +459,7 @@ def main(argv: list[str] | None = None, root: Path = ROOT) -> int:
     _say(f"[build] exe ：{exe}（{human_mib(exe.stat().st_size)}，"
          f"sha256={sha256_file(exe)}）")
     _say(f"[build] dist：{human_mib(total)}，{files} 个文件")
+    _say(f"[build] EXE 属性版本：{version}（资源文件 {verinfo}）")
 
     zip_path = distpath / zip_name(version)
     if opts.zip:

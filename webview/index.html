@@ -134,6 +134,7 @@
           </div>
           <!-- 批量模式：失败项重试 -->
           <div class="batch-actions" id="batch-actions" hidden>
+            <button class="btn btn-ghost btn-sm" id="btn-export-all" data-i18n="btn.exportAll">Export all (merged)</button>
             <button class="btn btn-ghost btn-sm" id="btn-retry-failed" data-i18n="btn.retryFailed">Retry failed</button>
           </div>
           <!-- 批量模式：逐文件结果列表（点击查看该文件内容/失败原因） -->
@@ -242,6 +243,8 @@
             <div class="seg" id="set-device"><button data-v="auto" class="on" data-i18n="set.deviceAuto">Auto</button><button data-v="cuda">CUDA</button><button data-v="cpu">CPU</button></div></div>
           <div class="row"><div class="label"><div class="t" data-i18n="set.outfmt">Output format</div><div class="d" data-i18n="set.outfmtDesc">File format for auto-saved results (the Save button follows it too)</div></div>
             <div class="seg" id="set-outfmt"><button data-v="md" class="on">Markdown</button><button data-v="txt" data-i18n="set.outfmtTxt">Plain text</button><button data-v="json" data-i18n="set.outfmtJson">JSON (pages/blocks)</button></div></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.outDir">Output directory</div><div class="d" data-i18n="set.outDirDesc">Where recognition results are saved; empty = the default outputs/ folder under the app directory. Changing it does not move existing files.</div></div>
+            <div class="with-browse"><input class="input mono" id="set-out-dir" placeholder="" spellcheck="false" style="width:260px;max-width:100%"><button class="btn btn-ghost btn-sm" id="btn-out-dir-browse" data-i18n="btn.browse">Browse…</button></div></div>
           <div class="row"><div class="label"><div class="t" data-i18n="set.theme">Appearance</div></div>
             <div class="seg" id="set-theme"><button class="on" data-v="light" data-i18n="set.themeLight">Light</button><button data-v="dark" data-i18n="set.themeDark">Dark</button><button data-v="system" data-i18n="set.themeSystem">Follow system</button></div></div>
           <div class="row"><div class="label"><div class="t" data-i18n="set.scale">UI scale</div><div class="d" data-i18n="set.scaleDesc">Adjust text and control size</div></div>

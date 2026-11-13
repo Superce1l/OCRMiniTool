@@ -66,6 +66,8 @@ DEFAULT_SETTINGS = {
     "pdfPageRange": "",      # 仅 PDF：如 "1-3,5,10-"；空 = 全部页
     "joinLines": False,      # 后处理：把硬换行拆开的同段文本接回去
     "cjkSpacing": False,     # 后处理：中英文/数字之间补空格
+    # ── E19：可配置输出目录（空 = 程序目录下 outputs，即模块级 OUTPUT_DIR）
+    "outputDir": "",
 }
 
 # 目录扫描 / 路径直读共用：允许的扩展名（与 ocr_engine 的图片扩展 + pdf 对齐）
@@ -284,6 +286,16 @@ def normalize_settings_patch(patch: dict) -> tuple[dict, dict | None]:
             if v is None:
                 return {}, _bad_value(key, out[key])
             out[key] = v
+    if "outputDir" in out:
+        raw = out["outputDir"]
+        v = str(raw if raw is not None else "").strip()
+        if v:
+            # 环境变量/家目录展开后必须是绝对路径；归一成 abspath 再存盘
+            expanded = os.path.expandvars(os.path.expanduser(v))
+            if not os.path.isabs(expanded):
+                return {}, _bad_value("outputDir", raw)
+            v = os.path.abspath(expanded)
+        out["outputDir"] = v
     return out, None
 
 
@@ -426,6 +438,28 @@ class WebBackend:
         d = (self._settings_raw().get("modelDir") or "").strip()
         return Path(d) if d else BASE_DIR / MODEL_SUBDIR
 
+    def output_dir(self) -> Path:
+        """识别结果 / 历史记录的落盘目录（E19）。
+
+        设置 `outputDir` 为空 → 回落**模块级** `OUTPUT_DIR`（程序目录下
+        outputs；既有测试通过 mock.patch.object(wb, "OUTPUT_DIR") 依赖它，
+        所以这个模块常量必须保留、且空设置时必须仍走它）。
+        非空 → 展开环境变量/家目录后使用；手改配置成相对路径等脏值时同样
+        回落 OUTPUT_DIR（不让识别因为一个脏设置直接失败）。
+        """
+        try:
+            raw = str(self._settings_raw().get("outputDir") or "").strip()
+        except Exception:
+            raw = ""
+        if raw:
+            try:
+                p = Path(os.path.expandvars(os.path.expanduser(raw)))
+                if p.is_absolute():
+                    return p
+            except (OSError, ValueError):
+                pass
+        return Path(OUTPUT_DIR)
+
     def _settings_raw(self) -> dict:
         # SettingsStore 自带缓存；这里只补默认值
         cur = dict(DEFAULT_SETTINGS)
@@ -455,6 +489,10 @@ class WebBackend:
                 "pdfPageRange": str(cur.get("pdfPageRange") or ""),
                 "joinLines": bool(cur.get("joinLines", False)),
                 "cjkSpacing": bool(cur.get("cjkSpacing", False)),
+                # E19：输出目录（outputDir=设置原值，空表示跟随程序目录；
+                # outDir=解析后的绝对落盘目录，前端展示/打开目录都用它）
+                "outputDir": str(cur.get("outputDir") or ""),
+                "outDir": str(self.output_dir()),
                 "languages": available_languages(),
                 "defaultModelDir": str(BASE_DIR / MODEL_SUBDIR),
                 # 源码运行才可切换解释器；PyInstaller 冻结版前端隐藏该设置
@@ -467,6 +505,16 @@ class WebBackend:
         patch, bad = normalize_settings_patch(patch)
         if bad is not None:
             return bad
+        # E19：输出目录变更的**运行期**校验（写盘之前，失败整批不写）
+        if "outputDir" in patch:
+            current = str(self._settings_raw().get("outputDir") or "").strip()
+            if patch["outputDir"] != current:
+                if self.has_running_tasks():
+                    # 识别/下载中途换目录 → 结果会分裂到两个目录，直接拒绝
+                    return {"ok": False, "error": tr("err.busy")}
+                problem = self._probe_output_dir(patch["outputDir"])
+                if problem is not None:
+                    return {"ok": False, "error": problem}
         # 模型目录变化即时同步给引擎（仅空闲时切，避免下载/识别中途换目录——
         # 否则会出现「下载到新目录、加载却找旧目录」的分裂）
         if "modelDir" in patch and not self.has_running_tasks():
@@ -488,6 +536,22 @@ class WebBackend:
 
     def persisted_theme(self) -> str:
         return self._settings_raw().get("theme", "light")
+
+    def _probe_output_dir(self, output_dir: str) -> str | None:
+        """E19：验证输出目录可创建、可写。返回 None=可用，否则返回错误文案。
+
+        做法：mkdir(parents=True, exist_ok=True) + 写一个探针文件随即删掉。
+        写盘前调用；任何失败都转成 err.outDirUnwritable（不抛异常给调用方）。
+        """
+        target = Path(output_dir) if output_dir else Path(OUTPUT_DIR)
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            probe = target / f".ocrmini_write_probe_{os.getpid()}"
+            probe.write_bytes(b"")
+            probe.unlink(missing_ok=True)
+        except OSError:
+            return tr("err.outDirUnwritable", path=str(target))
+        return None
 
     def set_theme_callback(self, cb):
         self._theme_cb = cb
@@ -517,7 +581,7 @@ class WebBackend:
             "version": APP_VERSION,
             "modelState": st,
             "modelDir": str(self._model_dir()),
-            "outDir": str(OUTPUT_DIR),
+            "outDir": str(self.output_dir()),
             "modelError": self.engine.error,
             "loadedDevice": self._loaded_device,
             "devicePref": cur.get("devicePref", "auto"),
@@ -1201,13 +1265,14 @@ class WebBackend:
            "pages": [{"page": 1, "blocks": [{...}, ...]}, ...]}
         blocks 直接来自引擎（原始像素坐标、渲染片段），后端不加工。
         """
-        OUTPUT_DIR.mkdir(exist_ok=True)
+        out_dir = self.output_dir()          # E19：可配置输出目录（空 → OUTPUT_DIR）
+        out_dir.mkdir(parents=True, exist_ok=True)
         name = self._sanitize_name(name)          # 兜底：调用方已净化也不亏
         ext = fmt if fmt in _OUT_FORMATS else "md"
-        out = OUTPUT_DIR / f"{name}.{ext}"
+        out = out_dir / f"{name}.{ext}"
         i = 1
         while out.exists():
-            out = OUTPUT_DIR / f"{name} ({i}).{ext}"
+            out = out_dir / f"{name} ({i}).{ext}"
             i += 1
         pages = result.get("pages") or [result.get("text", "")]
         if fmt == "json":
@@ -1329,8 +1394,9 @@ class WebBackend:
     # ── 历史输出 ─────────────────────────────────────────────
     def list_history(self) -> dict:
         try:
+            out_dir = self.output_dir()      # E19：历史与识别结果同一个目录
             items = []
-            for p in sorted((q for q in OUTPUT_DIR.iterdir()
+            for p in sorted((q for q in out_dir.iterdir()
                              if q.suffix.lower() in (".md", ".txt")),
                             key=lambda x: x.stat().st_mtime,
                             reverse=True)[:50]:
@@ -1363,11 +1429,14 @@ class WebBackend:
             return {"ok": False, "error": str(e)}
 
     def _history_path(self, name: str) -> Path:
-        """历史文件名 → outputs/ 下的实际路径（保持 .md/.txt 后缀）。"""
+        """历史文件名 → 输出目录下的实际路径（保持 .md/.txt 后缀；E19）。
+
+        目录走 `self.output_dir()`（历史读/删与识别落盘必须同一个目录）。
+        """
         safe = self._sanitize_name(Path(name).name)
         if not safe.lower().endswith((".md", ".txt")):
             safe += ".md"
-        return OUTPUT_DIR / safe
+        return self.output_dir() / safe
 
     @staticmethod
     def _recycle_file(p: Path) -> bool:
@@ -1558,8 +1627,11 @@ class WebBackend:
 
     # ── 桌面辅助 ─────────────────────────────────────────────
     def open_output_dir(self) -> bool:
+        """在资源管理器打开输出目录（E19：跟随设置；不存在先建）。"""
         try:
-            os.startfile(str(OUTPUT_DIR))   # noqa: S606
+            out_dir = self.output_dir()
+            out_dir.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(out_dir))   # noqa: S606
             return True
         except Exception:
             return False

@@ -358,7 +358,7 @@ textarea.input { resize: vertical; min-height: 56px; font-size: 13px; line-heigh
 .file-summary { display: flex; align-items: center; gap: 12px; margin-top: 8px;
   font-size: 12px; color: var(--muted); }
 .file-summary[hidden] { display: none; }
-.batch-actions { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.batch-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
 .batch-actions[hidden] { display: none; }
 /* 批量失败项完整错误（保留换行与长路径，不截断） */
 .batch-error {

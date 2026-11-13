@@ -205,9 +205,10 @@ set "PYTHONPATH="
 | 3 工作区 | `git status --porcelain -uall` 必须为空（`--allow-dirty` 可跳过；无 git 时告警继续） | 退出 2 |
 | 4 torch 预检 | `find_spec("torch")` 必须为 None（`--allow-bundled-torch` 可绕过，但不推荐） | 退出 2 |
 | 5 工具链 | `importlib.metadata.version("pyinstaller")` 必须可读；Python ≠3.12 只告警 | 退出 2 |
-| 6 构建 | `python -m PyInstaller --clean --noconfirm --distpath dist --workpath build OCRMiniTool.spec`（cwd=仓库根，透传 `OCRMIT_ALLOW_BUNDLED_TORCH`） | 退出 3 |
-| 7 自检 | `dist\OCRMiniTool\OCRMiniTool.exe` 存在；打印体积/文件数/耗时；`--zip` 打 `dist\OCRMiniTool-v<ver>-windows-x64.zip` 并打印 SHA256 | 退出 4 |
-| 8 提示 | 未加 `--zip` 时打印 PowerShell 压缩命令 + exe 的 SHA256；产物在受管工作区时打印 Low IL 迁移提示（§5.1） | — |
+| 6 版本资源 | **D15**：写 `build\OCRMiniTool_version_info.txt`（`render_version_info()`，含 filevers/字符串表/Translation 1033·1200），在调 PyInstaller **之前**；`--dry-run` 不落盘 | 退出 2 |
+| 7 构建 | `python -m PyInstaller --clean --noconfirm --distpath dist --workpath build OCRMiniTool.spec`（cwd=仓库根，透传 `OCRMIT_ALLOW_BUNDLED_TORCH`） | 退出 3 |
+| 8 自检 | `dist\OCRMiniTool\OCRMiniTool.exe` 存在；打印体积/文件数/耗时/EXE 属性版本；`--zip` 打 `dist\OCRMiniTool-v<ver>-windows-x64.zip` 并打印 SHA256 | 退出 4 |
+| 9 提示 | 未加 `--zip` 时打印 PowerShell 压缩命令 + exe 的 SHA256；产物在受管工作区时打印 Low IL 迁移提示（§5.1） | — |
 
 退出码：`0` 成功 / `2` 预检失败 / `3` 构建失败 / `4` 产物缺失。脚本只写 `dist/`、`build/`
 （均已 gitignore），不改任何源文件。
@@ -404,7 +405,11 @@ Windows 不允许覆盖已加载 DLL。后果：安装失败（`envDownloading` 
 
 ## 7. 发布前必须补（第二阶段实测后更新）
 
-1. **EXE 版本资源**（`version=` / FileVersion=APP_VERSION）：支持排查与杀软识别。
+1. ✅ **EXE 版本资源（D15 已落地）**：`tools/build_exe.py` 构建前由
+   `render_version_info()` 写 `build/OCRMiniTool_version_info.txt`，`OCRMiniTool.spec`
+   动态 `EXE(version=_verfile)` 读取（spec 不写死版本号）；EXE 属性里可见
+   FileVersion/ProductVersion=APP_VERSION。另有 `tools/release_check.py`（D4）把关
+   版本↔tag↔工作区↔远端↔zip，见 §9。
 2. ✅ **组件包整包 sha256 校验（D5 已落地）**：解压前校验整包哈希，默认 warn-only，
    `OCRMT_VERIFY_RUNTIME=strict` 时删包抛错；发布侧需上传 `<zip>.sha256` / `manifest.json`
    （否则应用只能 WARN 跳过）。详见 §8。
@@ -495,3 +500,49 @@ PY="C:/Users/admin/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/python/pyt
 "$PY" tests/run_tests.py test_component_sha256     # 16 例，全本地 http.server，无外网
 "$PY" tests/run_tests.py                          # 全量回归
 ```
+
+## 9. 发布流程（D15 + D4）
+
+### 9.1 一条链路：改版本 → 构建（带 EXE 版本资源）→ release_check → 上传
+
+1. **版本与 tag**：改 `version.py` 的 `APP_VERSION`（唯一来源）→ 提交 → `git tag v<ver>`
+   **指向 HEAD** 并推送（`git push origin v<ver>`）。`release_check` 会校验 tag 与
+   APP_VERSION 一致、tag 存在且指向当前 HEAD。
+2. **构建**（干净构建 venv，见 §3.2）：
+   ```bat
+   "%LOCALAPPDATA%\OCRMiniTool\build_venv\Scripts\python.exe" tools\build_exe.py --zip
+   ```
+   - 调 PyInstaller **之前**先写 `build\OCRMiniTool_version_info.txt`
+     （`render_version_info()`：filevers/prodvers、FileVersion/ProductVersion、
+     ProductName=OCR Mini Tool、FileDescription、CompanyName、LegalCopyright、
+     Translation 1033/1200）；`OCRMiniTool.spec` 用 `EXE(version=_verfile)` 动态读取，
+     **spec 里没有写死版本号**。
+   - 验证 EXE 属性：资源管理器 → 属性 → 详细信息；或
+     `powershell "(Get-Item dist\OCRMiniTool\OCRMiniTool.exe).VersionInfo | fl FileVersion,ProductVersion"`
+   - `--zip` 产出 `dist\OCRMiniTool-v<ver>-windows-x64.zip` 并打印 SHA256。
+3. **发布前检查**：
+   ```bat
+   python tools\release_check.py                     rem 默认 tag=v<APP_VERSION>、zip=dist 默认名
+   python tools\release_check.py --offline           rem 跳过远端 tag（离线/无 origin）
+   python tools\release_check.py --write-sums        rem 额外写 SHA256SUMS.txt
+   ```
+   - 逐项 ✓/✗：a 版本↔tag、b 工作区干净、c tag 存在且指向 HEAD、d 远端 origin 有该 tag、
+     e zip 名含版本 + sha256（末尾打印）。
+   - 退出码 `0` 全过 / `1` 有失败项 / `2` 参数/环境错误（非 git 仓库、tag 格式非法、
+     `--write-sums` 但 zip 不存在）。
+   - `--write-sums` 在 zip 同目录写 `SHA256SUMS.txt`，内容 `<hex>  <basename>`（LF）。
+4. **上传 GitHub Release**（tag = `v<ver>`）：主 zip + `SHA256SUMS.txt`；
+   推理组件的资产清单见 §8.1（组件 zip/分卷 + `<zip>.sha256`/`SHA256SUMS`/`manifest.json`）。
+5. **上传后自检**：`release_check --offline` 再跑一次，确认 zip sha256 与 Release 说明一致。
+
+`tests/test_build_release.py`（20 例，mock git、不联网、不跑 PyInstaller）覆盖本流程的
+版本资源渲染、spec 接线、检查项与退出码。
+
+### 9.2 本机无法验证的点（无构建环境）
+
+- **EXE 资源是否真的生效**：本批**不跑全量 PyInstaller 构建**，只验证了 VSVersionInfo
+  文本与 spec 的 `version=_verfile` 接线；首次真机构建后用上面第 2 步的 PowerShell/
+  属性面板抽查一次即可关闭该风险。
+- **代码签名**：未配证书，`release_check` 也不检查签名（SmartScreen 提示仍按 §5.1 处理）。
+- **远端 tag 项**：本地未 `git fetch --tags` 时 c/d 会失败——先 `git fetch --tags` 再跑，
+  或用 `--offline` 只做本地检查。
